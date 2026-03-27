@@ -38,6 +38,12 @@ async function getAccessToken() {
 
   return cachedToken;
 }
+app.get("/", (req, res) => {
+  res.send(`
+    <h1>📦 Picklist App is working</h1>
+    <p><a href="/orders">Click here to view unfulfilled orders</a></p>
+  `);
+});
 
 app.get("/orders", async (req, res) => {
   try {

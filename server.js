@@ -59,11 +59,39 @@ app.get("/orders", async (req, res) => {
     );
 
     const data = await response.json();
+    const orders = data.orders || [];
 
-    res.json(data.orders || []);
+    if (!orders.length) {
+      return res.send("<h2>✅ No unfulfilled orders right now</h2>");
+    }
+
+    let html = `
+      <h1>📦 Warehouse Picklist</h1>
+      <style>
+        body { font-family: Arial; padding:20px; }
+        .order { margin-bottom:25px; }
+        .item { margin-left:15px; }
+      </style>
+    `;
+
+    orders.forEach(order => {
+      html += `<div class="order"><h3>${order.name}</h3>`;
+
+      order.line_items.forEach(item => {
+        html += `
+          <div class="item">
+            <input type="checkbox">
+            ${item.quantity} × ${item.title}
+          </div>
+        `;
+      });
+
+      html += `</div>`;
+    });
+
+    res.send(html);
+
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    res.status(500).send("Error loading picklist: " + err.message);
   }
 });
-
-app.listen(PORT, () => console.log("Server running"));

@@ -1,47 +1,48 @@
 const express = require("express");
 const fetch = require("node-fetch");
+const { Pool } = require("pg"); // Added Postgres
 const app = express();
 
-// 1. CONFIGURATION
-// These MUST be set in Railway's "Variables" tab
+app.use(express.urlencoded({ extended: true })); // To read form data
+
 const SHOP = process.env.SHOP_NAME;
 const CLIENT_ID = process.env.SHOPIFY_CLIENT_ID;
 const CLIENT_SECRET = process.env.SHOPIFY_CLIENT_SECRET;
 const PORT = process.env.PORT || 3000;
 
+// 1. DATABASE CONNECTION
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: { rejectUnauthorized: false }
+});
+
+// Setup Table (Runs once to ensure your DB is ready)
+pool.query(`
+  CREATE TABLE IF NOT EXISTS batches (
+    id SERIAL PRIMARY KEY,
+    name TEXT,
+    order_ids TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+  );
+`).catch(err => console.error("DB Setup Error:", err));
+
 let cachedToken = null;
 let tokenExpiry = 0;
 
-// 2. ACCESS TOKEN LOGIC (OAuth Client Credentials)
 async function getAccessToken() {
   if (cachedToken && Date.now() < tokenExpiry) return cachedToken;
-
   const response = await fetch(`https://${SHOP}.myshopify.com/admin/oauth/access_token`, {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
     body: `grant_type=client_credentials&client_id=${CLIENT_ID}&client_secret=${CLIENT_SECRET}`,
   });
-
   const data = await response.json();
-  if (!data.access_token) throw new Error("Token failure: " + JSON.stringify(data));
-
   cachedToken = data.access_token;
   tokenExpiry = Date.now() + (data.expires_in - 300) * 1000;
   return cachedToken;
 }
 
-// 3. HOME ROUTE
-app.get("/", (req, res) => {
-  res.send(`
-    <div style="font-family:sans-serif; text-align:center; padding:50px;">
-      <h1>📦 Picklist App</h1>
-      <p>Status: Online</p>
-      <a href="/orders" style="background:#008060; color:white; padding:10px 20px; text-decoration:none; border-radius:5px;">View Orders</a>
-    </div>
-  `);
-});
-
-// 4. PICKLIST ROUTE (The Fixed Version)
+// 2. MAIN ORDERS VIEW (Selection Mode)
 app.get("/orders", async (req, res) => {
   try {
     const token = await getAccessToken();
@@ -49,66 +50,78 @@ app.get("/orders", async (req, res) => {
       `https://${SHOP}.myshopify.com/admin/api/2024-04/orders.json?status=unfulfilled&limit=50`,
       { headers: { "X-Shopify-Access-Token": token } }
     );
-
     const data = await response.json();
-    const orders = data.orders || []; // Ensure orders is defined even if empty
+    const orders = data.orders || [];
 
-    if (orders.length === 0) {
-      return res.send(`
-        <div style="font-family:sans-serif; padding:40px; text-align:center;">
-          <h1>✅ All caught up!</h1>
-          <a href="/">Go Back</a>
-        </div>
-      `);
-    }
-
-    // Build the "Pickify" Style UI
     let html = `
       <style>
-        :root { --primary: #008060; --bg: #f6f6f7; --text: #202223; }
-        body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; background: var(--bg); color: var(--text); padding: 20px; }
-        .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; }
-        .order-card { background: white; border-radius: 12px; padding: 20px; margin-bottom: 16px; border: 1px solid #e1e3e5; box-shadow: 0 2px 4px rgba(0,0,0,0.05); }
-        .item-row { display: flex; align-items: center; padding: 12px 0; border-bottom: 1px solid #f1f2f3; }
-        .item-row:last-child { border-bottom: none; }
-        .sku { display: block; font-size: 0.8rem; color: #6d7175; font-weight: bold; }
-        .qty { color: var(--primary); font-weight: bold; margin-right: 8px; }
-        .btn-fulfill { background: var(--primary); color: white; border: none; padding: 12px 20px; border-radius: 8px; cursor: pointer; font-weight: 600; width: 100%; margin-top: 15px; }
-        input[type="checkbox"] { width: 22px; height: 22px; margin-right: 15px; cursor: pointer; }
+        :root { --primary: #008060; --bg: #f6f6f7; }
+        body { font-family: sans-serif; background: var(--bg); padding: 20px; }
+        .header { display: flex; justify-content: space-between; align-items: center; position: sticky; top: 0; background: var(--bg); padding: 10px 0; z-index: 10; }
+        .card { background: white; border-radius: 8px; padding: 15px; margin-bottom: 10px; border: 1px solid #ddd; display: flex; align-items: center; }
+        .batch-btn { background: var(--primary); color: white; border: none; padding: 12px 24px; border-radius: 6px; font-weight: bold; cursor: pointer; }
+        .order-info { flex-grow: 1; margin-left: 15px; }
+        .sku-list { font-size: 0.8rem; color: #666; }
       </style>
-      <div class="header">
-        <h1>📦 Warehouse Picklist</h1>
-        <span>${orders.length} Orders</span>
-      </div>`;
 
-    orders.forEach(order => {
-      html += `
-        <div class="order-card">
-          <h3>Order ${order.name}</h3>
-          ${order.line_items.map(item => `
-            <div class="item-row">
-              <input type="checkbox">
-              <div>
-                <span class="sku">${item.sku || 'NO SKU'}</span>
-                <span class="qty">${item.quantity}x</span> ${item.title}
-              </div>
+      <form action="/create-batch" method="POST">
+        <div class="header">
+          <h1>📦 Select Orders</h1>
+          <button type="submit" class="batch-btn">Create Picklist from Selection</button>
+        </div>
+
+        ${orders.map(order => `
+          <div class="card">
+            <input type="checkbox" name="selected_orders" value="${order.id}" style="width:25px; height:25px;">
+            <div class="order-info">
+              <strong>Order ${order.name}</strong>
+              <div class="sku-list">${order.line_items.map(i => i.sku || 'No SKU').join(', ')}</div>
             </div>
-          `).join('')}
-          <form action="/fulfill/${order.id}" method="POST">
-            <button type="submit" class="btn-fulfill">Mark as Fulfilled</button>
-          </form>
-        </div>`;
-    });
-
+            <span>${order.line_items.length} items</span>
+          </div>
+        `).join('')}
+      </form>
+    `;
     res.send(html);
-
   } catch (err) {
-    console.error(err);
-    res.status(500).send("Error: " + err.message);
+    res.status(500).send(err.message);
   }
 });
 
-// 5. START SERVER
-app.listen(PORT, '0.0.0.0', () => {
-  console.log(`Server started on port ${PORT}`);
+// 3. CREATE BATCH ROUTE (Saves to Postgres)
+app.post("/create-batch", async (req, res) => {
+  const selectedIds = req.body.selected_orders;
+  if (!selectedIds) return res.send("No orders selected!");
+
+  const orderIdsString = Array.isArray(selectedIds) ? selectedIds.join(",") : selectedIds;
+  const batchName = `Batch #${Math.floor(Math.random() * 10000)}`;
+
+  try {
+    await pool.query(
+      "INSERT INTO batches (name, order_ids) VALUES ($1, $2)",
+      [batchName, orderIdsString]
+    );
+    res.redirect("/batches");
+  } catch (err) {
+    res.status(500).send("Database Error: " + err.message);
+  }
 });
+
+// 4. VIEW SAVED BATCHES
+app.get("/batches", async (req, res) => {
+  const result = await pool.query("SELECT * FROM batches ORDER BY created_at DESC");
+  let html = `<h1>📜 Saved Picklists</h1><a href="/orders">Back to Orders</a><br><br>`;
+  
+  result.rows.forEach(batch => {
+    html += `
+      <div style="background:white; padding:15px; border:1px solid #ddd; margin-bottom:10px; border-radius:8px;">
+        <strong>${batch.name}</strong> - ${batch.order_ids.split(',').length} Orders
+        <br><small>Created: ${batch.created_at.toLocaleString()}</small>
+        <br><button disabled>Download PDF (Coming Soon)</button>
+      </div>
+    `;
+  });
+  res.send(html);
+});
+
+app.listen(PORT, '0.0.0.0', () => console.log(`Running on ${PORT}`));

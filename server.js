@@ -13,7 +13,12 @@ const PORT = process.env.PORT || 3000;
 // 1. DATABASE CONNECTION
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
-  ssl: { rejectUnauthorized: false }
+  ssl: process.env.DATABASE_URL.includes('localhost') ? false : { rejectUnauthorized: false }
+});
+
+// Add this to help us see errors in the logs
+pool.on('error', (err) => {
+  console.error('Unexpected error on idle client', err);
 });
 
 // Setup Table (Runs once to ensure your DB is ready)

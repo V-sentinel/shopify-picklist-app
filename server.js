@@ -1,87 +1,61 @@
-// Replace the HTML section in your /orders route with this:
+app.get("/orders", async (req, res) => {
+  try {
+    const token = await getAccessToken();
+    const response = await fetch(
+      `https://${SHOP}.myshopify.com/admin/api/2024-04/orders.json?status=unfulfilled&limit=50`,
+      { headers: { "X-Shopify-Access-Token": token } }
+    );
 
+    const data = await response.json();
+    
+    // SAFE CHECK: Ensure orders exists before we use it
+    const orders = data.orders || [];
+
+    if (orders.length === 0) {
+        return res.send(`
+            <div style="font-family:sans-serif; padding:40px; text-align:center;">
+                <h1>✅ All caught up!</h1>
+                <p>No unfulfilled orders found.</p>
+                <a href="/">Go Back</a>
+            </div>
+        `);
+    }
+
+    // Now it is safe to build the HTML because 'orders' is defined
     let html = `
       <style>
         :root { --primary: #008060; --bg: #f6f6f7; --text: #202223; }
-        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: var(--bg); color: var(--text); padding: 20px; }
-        .header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 20px; }
-        
-        .order-card { 
-            background: white; border-radius: 12px; box-shadow: 0 2px 4px rgba(0,0,0,0.05); 
-            margin-bottom: 16px; overflow: hidden; border: 1px solid #e1e3e5;
-        }
-        .order-header { 
-            padding: 16px; background: #fafbfb; border-bottom: 1px solid #e1e3e5; 
-            display: flex; justify-content: space-between; align-items: center;
-        }
-        .order-id { font-weight: 700; font-size: 1.1rem; }
-        
-        .items-list { padding: 8px 16px; }
-        .item-row { 
-            display: flex; align-items: center; padding: 12px 0; border-bottom: 1px solid #f1f2f3; 
-        }
-        .item-row:last-child { border-bottom: none; }
-        
-        /* Modern Checkbox */
-        .check-container { position: relative; cursor: pointer; padding-left: 35px; flex-grow: 1; }
-        .check-container input { position: absolute; opacity: 0; cursor: pointer; }
-        .checkmark { 
-            position: absolute; top: 0; left: 0; height: 24px; width: 24px; 
-            background-color: #eee; border-radius: 6px; border: 2px solid #ccc;
-        }
-        .check-container:hover input ~ .checkmark { background-color: #ddd; }
-        .check-container input:checked ~ .checkmark { background-color: var(--primary); border-color: var(--primary); }
-        .checkmark:after {
-            content: ""; position: absolute; display: none;
-            left: 8px; top: 4px; width: 5px; height: 10px;
-            border: solid white; border-width: 0 3px 3px 0; transform: rotate(45deg);
-        }
-        .check-container input:checked ~ .checkmark:after { display: block; }
-        .check-container input:checked + .item-details { text-decoration: line-through; opacity: 0.6; }
-
-        .sku { display: block; font-size: 0.8rem; color: #6d7175; text-transform: uppercase; letter-spacing: 0.5px; }
-        .qty { font-weight: bold; margin-right: 10px; color: var(--primary); }
-        
-        .footer-action { padding: 16px; background: #fdfdfd; text-align: right; }
-        .btn-fulfill { 
-            background: var(--primary); color: white; border: none; padding: 10px 24px; 
-            border-radius: 8px; font-weight: 600; cursor: pointer; transition: 0.2s;
-        }
-        .btn-fulfill:hover { background: #006e52; }
+        body { font-family: -apple-system, sans-serif; background: var(--bg); color: var(--text); padding: 20px; }
+        .order-card { background: white; border-radius: 12px; padding: 16px; margin-bottom: 16px; border: 1px solid #e1e3e5; shadow: 0 2px 4px rgba(0,0,0,0.05); }
+        .item-row { display: flex; align-items: center; padding: 10px 0; border-bottom: 1px solid #f1f2f3; }
+        .sku { display: block; font-size: 0.75rem; color: #6d7175; }
+        .btn-fulfill { background: var(--primary); color: white; border: none; padding: 10px 20px; border-radius: 8px; cursor: pointer; font-weight: bold; margin-top: 15px; }
       </style>
-
-      <div class="header">
-        <h1>📦 Picklist</h1>
-        <span>${orders.length} Orders Pending</span>
-      </div>`;
+      <h1>📦 Picklist (${orders.length} Orders)</h1>`;
 
     orders.forEach(order => {
       html += `
         <div class="order-card">
-          <div class="order-header">
-            <span class="order-id">Order ${order.name}</span>
-            <span class="badge">${order.line_items.length} items</span>
-          </div>
-          
-          <div class="items-list">
-            ${order.line_items.map(item => `
-              <div class="item-row">
-                <label class="check-container">
-                  <input type="checkbox">
-                  <span class="checkmark"></span>
-                  <div class="item-details">
-                    <span class="sku">${item.sku || 'NO SKU'}</span>
-                    <span class="qty">${item.quantity}x</span> ${item.title}
-                  </div>
-                </label>
+          <h3>Order ${order.name}</h3>
+          ${order.line_items.map(item => `
+            <div class="item-row">
+              <input type="checkbox" style="width:20px; height:20px; margin-right:15px;">
+              <div>
+                <span class="sku">${item.sku || 'NO SKU'}</span>
+                <strong>${item.quantity}x</strong> ${item.title}
               </div>
-            `).join('')}
-          </div>
-
-          <div class="footer-action">
-            <form action="/fulfill/${order.id}" method="POST" onsubmit="return confirm('Ready to fulfill ${order.name}?')">
-              <button type="submit" class="btn-fulfill">Complete Fulfillment</button>
-            </form>
-          </div>
+            </div>
+          `).join('')}
+          <form action="/fulfill/${order.id}" method="POST">
+            <button type="submit" class="btn-fulfill">Mark as Fulfilled</button>
+          </form>
         </div>`;
     });
+
+    res.send(html);
+
+  } catch (err) {
+    console.error("Error fetching orders:", err);
+    res.status(500).send("Error loading orders: " + err.message);
+  }
+});

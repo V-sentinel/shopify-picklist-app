@@ -11,10 +11,12 @@ const PORT = process.env.PORT || 3000;
 
 app.use(express.urlencoded({ extended: true }));
 
-// 2. DATABASE CONNECTION
+// 2. DATABASE CONNECTION (Auto-detects SSL needs)
+const isInternal = process.env.DATABASE_URL && process.env.DATABASE_URL.includes("railway.internal");
+
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
-  ssl: { rejectUnauthorized: false }
+  ssl: isInternal ? false : { rejectUnauthorized: false }
 });
 
 let cachedToken = null;
@@ -101,7 +103,7 @@ app.get("/orders", async (req, res) => {
   }
 });
 
-// CREATE BATCH (Modified to create table on-demand and show detailed error)
+// CREATE BATCH
 app.post("/create-batch", async (req, res) => {
   const selectedIds = req.body.selected_orders;
   if (!selectedIds) return res.send("<script>alert('Select orders first!'); window.history.back();</script>");
@@ -110,7 +112,6 @@ app.post("/create-batch", async (req, res) => {
   const batchName = `Batch #${Math.floor(1000 + Math.random() * 9000)}`;
 
   try {
-    // 1. Create table on demand in case it wasn't made on startup
     await pool.query(`
       CREATE TABLE IF NOT EXISTS batches (
         id SERIAL PRIMARY KEY,
@@ -120,7 +121,6 @@ app.post("/create-batch", async (req, res) => {
       );
     `);
 
-    // 2. Insert the data
     await pool.query(
       "INSERT INTO batches (name, order_ids) VALUES ($1, $2)",
       [batchName, orderIdsString]

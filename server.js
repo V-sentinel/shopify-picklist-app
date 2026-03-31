@@ -11,26 +11,12 @@ const PORT = process.env.PORT || 3000;
 
 app.use(express.urlencoded({ extended: true }));
 
-// 2. DATABASE CONNECTION (With Safety Check)
+// 2. DATABASE CONNECTION
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
-  // This line prevents crashing if DATABASE_URL is missing or local
-  ssl: (process.env.DATABASE_URL && process.env.DATABASE_URL.includes('localhost')) 
-       ? false 
-       : { rejectUnauthorized: false }
+  ssl: { rejectUnauthorized: false }
 });
 
-// Setup Table
-pool.query(`
-  CREATE TABLE IF NOT EXISTS batches (
-    id SERIAL PRIMARY KEY,
-    name TEXT,
-    order_ids TEXT,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-  );
-`).catch(err => console.error("Database table check failed:", err));
-
-// 3. SHOPIFY ACCESS TOKEN
 let cachedToken = null;
 let tokenExpiry = 0;
 
@@ -51,9 +37,9 @@ async function getAccessToken() {
   return cachedToken;
 }
 
-// 4. ROUTES
+// 3. ROUTES
 
-// HOME REDIRECT: Fixes "Cannot GET /"
+// HOME REDIRECT
 app.get("/", (req, res) => {
   res.redirect("/orders");
 });
@@ -115,7 +101,7 @@ app.get("/orders", async (req, res) => {
   }
 });
 
-// CREATE BATCH
+// CREATE BATCH (Modified to create table on-demand and show detailed error)
 app.post("/create-batch", async (req, res) => {
   const selectedIds = req.body.selected_orders;
   if (!selectedIds) return res.send("<script>alert('Select orders first!'); window.history.back();</script>");
@@ -124,13 +110,37 @@ app.post("/create-batch", async (req, res) => {
   const batchName = `Batch #${Math.floor(1000 + Math.random() * 9000)}`;
 
   try {
+    // 1. Create table on demand in case it wasn't made on startup
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS batches (
+        id SERIAL PRIMARY KEY,
+        name TEXT,
+        order_ids TEXT,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      );
+    `);
+
+    // 2. Insert the data
     await pool.query(
       "INSERT INTO batches (name, order_ids) VALUES ($1, $2)",
       [batchName, orderIdsString]
     );
     res.redirect("/batches");
   } catch (err) {
-    res.status(500).send("Database Save Error: " + err.message);
+    console.error("Save Error Details:", err);
+    res.status(500).send(`
+      <div style="font-family: sans-serif; padding: 40px; text-align: center;">
+        <h1 style="color: #d9534f;">❌ Database Save Error</h1>
+        <p>Your app couldn't save the batch to PostgreSQL.</p>
+        <div style="background: #f8f9fa; border: 1px solid #ddd; padding: 15px; display: inline-block; text-align: left; margin: 20px 0; border-radius: 5px;">
+          <strong>Error Message:</strong> ${err.message || 'Unknown error'}<br>
+          <strong>Error Code:</strong> ${err.code || 'None'}<br>
+          <strong>Detail:</strong> ${err.detail || 'None'}
+        </div>
+        <br><br>
+        <a href="/orders" style="background: #008060; color: white; padding: 10px 20px; border-radius: 5px; text-decoration: none;">Go Back</a>
+      </div>
+    `);
   }
 });
 
@@ -166,7 +176,6 @@ app.get("/batches", async (req, res) => {
   }
 });
 
-// 5. START SERVER
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`App running on port ${PORT}`);
 });

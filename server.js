@@ -31,6 +31,11 @@ pool.query(`
   );
 `).catch(err => console.error("DB Setup Error:", err));
 
+// Home route - redirect to orders
+app.get("/", (req, res) => {
+  res.redirect("/orders");
+});
+
 let cachedToken = null;
 let tokenExpiry = 0;
 

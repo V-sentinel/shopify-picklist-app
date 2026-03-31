@@ -1,27 +1,26 @@
 const express = require("express");
 const fetch = require("node-fetch");
-const { Pool } = require("pg"); // Added Postgres
+const { Pool } = require("pg");
 const app = express();
 
-app.use(express.urlencoded({ extended: true })); // To read form data
-
+// 1. CONFIGURATION
 const SHOP = process.env.SHOP_NAME;
 const CLIENT_ID = process.env.SHOPIFY_CLIENT_ID;
 const CLIENT_SECRET = process.env.SHOPIFY_CLIENT_SECRET;
 const PORT = process.env.PORT || 3000;
 
-// 1. DATABASE CONNECTION
+app.use(express.urlencoded({ extended: true }));
+
+// 2. DATABASE CONNECTION (With Safety Check)
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
-  ssl: process.env.DATABASE_URL.includes('localhost') ? false : { rejectUnauthorized: false }
+  // This line prevents crashing if DATABASE_URL is missing or local
+  ssl: (process.env.DATABASE_URL && process.env.DATABASE_URL.includes('localhost')) 
+       ? false 
+       : { rejectUnauthorized: false }
 });
 
-// Add this to help us see errors in the logs
-pool.on('error', (err) => {
-  console.error('Unexpected error on idle client', err);
-});
-
-// Setup Table (Runs once to ensure your DB is ready)
+// Setup Table
 pool.query(`
   CREATE TABLE IF NOT EXISTS batches (
     id SERIAL PRIMARY KEY,
@@ -29,25 +28,37 @@ pool.query(`
     order_ids TEXT,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
   );
-`).catch(err => console.error("DB Setup Error:", err));
+`).catch(err => console.error("Database table check failed:", err));
 
+// 3. SHOPIFY ACCESS TOKEN
 let cachedToken = null;
 let tokenExpiry = 0;
 
 async function getAccessToken() {
   if (cachedToken && Date.now() < tokenExpiry) return cachedToken;
+  
   const response = await fetch(`https://${SHOP}.myshopify.com/admin/oauth/access_token`, {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
     body: `grant_type=client_credentials&client_id=${CLIENT_ID}&client_secret=${CLIENT_SECRET}`,
   });
+  
   const data = await response.json();
+  if (!data.access_token) throw new Error("Shopify Auth Failed");
+  
   cachedToken = data.access_token;
   tokenExpiry = Date.now() + (data.expires_in - 300) * 1000;
   return cachedToken;
 }
 
-// 2. MAIN ORDERS VIEW (Selection Mode)
+// 4. ROUTES
+
+// HOME REDIRECT: Fixes "Cannot GET /"
+app.get("/", (req, res) => {
+  res.redirect("/orders");
+});
+
+// MAIN ORDERS VIEW
 app.get("/orders", async (req, res) => {
   try {
     const token = await getAccessToken();
@@ -61,45 +72,56 @@ app.get("/orders", async (req, res) => {
     let html = `
       <style>
         :root { --primary: #008060; --bg: #f6f6f7; }
-        body { font-family: sans-serif; background: var(--bg); padding: 20px; }
-        .header { display: flex; justify-content: space-between; align-items: center; position: sticky; top: 0; background: var(--bg); padding: 10px 0; z-index: 10; }
-        .card { background: white; border-radius: 8px; padding: 15px; margin-bottom: 10px; border: 1px solid #ddd; display: flex; align-items: center; }
-        .batch-btn { background: var(--primary); color: white; border: none; padding: 12px 24px; border-radius: 6px; font-weight: bold; cursor: pointer; }
+        body { font-family: -apple-system, sans-serif; background: var(--bg); padding: 20px; margin: 0; }
+        .header { background: white; padding: 20px; border-bottom: 1px solid #ddd; position: sticky; top: 0; display: flex; justify-content: space-between; align-items: center; z-index: 10; }
+        .card { background: white; border-radius: 10px; padding: 15px; margin: 15px 0; border: 1px solid #ddd; display: flex; align-items: center; box-shadow: 0 2px 4px rgba(0,0,0,0.05); }
         .order-info { flex-grow: 1; margin-left: 15px; }
-        .sku-list { font-size: 0.8rem; color: #666; }
+        .sku-tag { background: #eee; padding: 2px 6px; border-radius: 4px; font-size: 11px; margin-right: 5px; }
+        .batch-btn { background: var(--primary); color: white; border: none; padding: 12px 24px; border-radius: 8px; font-weight: bold; cursor: pointer; }
+        input[type="checkbox"] { transform: scale(1.5); cursor: pointer; }
+        .nav-links { padding: 10px 0; }
       </style>
 
-      <form action="/create-batch" method="POST">
-        <div class="header">
-          <h1>📦 Select Orders</h1>
-          <button type="submit" class="batch-btn">Create Picklist from Selection</button>
+      <div class="header">
+        <h1>📦 Picklist</h1>
+        <div class="nav-links"><a href="/batches">View Saved Batches</a></div>
+      </div>
+
+      <form action="/create-batch" method="POST" style="max-width: 800px; margin: auto;">
+        <div style="text-align: right; padding: 10px 0;">
+            <button type="submit" class="batch-btn">Create Batch Picklist</button>
         </div>
 
-        ${orders.map(order => `
+        ${orders.length === 0 ? '<p>No unfulfilled orders found.</p>' : orders.map(order => `
           <div class="card">
-            <input type="checkbox" name="selected_orders" value="${order.id}" style="width:25px; height:25px;">
+            <input type="checkbox" name="selected_orders" value="${order.id}">
             <div class="order-info">
               <strong>Order ${order.name}</strong>
-              <div class="sku-list">${order.line_items.map(i => i.sku || 'No SKU').join(', ')}</div>
+              <div style="margin-top:5px;">
+                ${order.line_items.map(i => `<span class="sku-tag">${i.sku || 'No SKU'}</span>`).join('')}
+              </div>
             </div>
-            <span>${order.line_items.length} items</span>
+            <div style="text-align:right">
+                <div style="font-size: 1.2rem; font-weight: bold;">${order.line_items.length}</div>
+                <div style="font-size: 0.7rem; color: #666;">ITEMS</div>
+            </div>
           </div>
         `).join('')}
       </form>
     `;
     res.send(html);
   } catch (err) {
-    res.status(500).send(err.message);
+    res.status(500).send("Error loading orders: " + err.message);
   }
 });
 
-// 3. CREATE BATCH ROUTE (Saves to Postgres)
+// CREATE BATCH
 app.post("/create-batch", async (req, res) => {
   const selectedIds = req.body.selected_orders;
-  if (!selectedIds) return res.send("No orders selected!");
+  if (!selectedIds) return res.send("<script>alert('Select orders first!'); window.history.back();</script>");
 
   const orderIdsString = Array.isArray(selectedIds) ? selectedIds.join(",") : selectedIds;
-  const batchName = `Batch #${Math.floor(Math.random() * 10000)}`;
+  const batchName = `Batch #${Math.floor(1000 + Math.random() * 9000)}`;
 
   try {
     await pool.query(
@@ -108,25 +130,43 @@ app.post("/create-batch", async (req, res) => {
     );
     res.redirect("/batches");
   } catch (err) {
-    res.status(500).send("Database Error: " + err.message);
+    res.status(500).send("Database Save Error: " + err.message);
   }
 });
 
-// 4. VIEW SAVED BATCHES
+// VIEW BATCHES
 app.get("/batches", async (req, res) => {
-  const result = await pool.query("SELECT * FROM batches ORDER BY created_at DESC");
-  let html = `<h1>📜 Saved Picklists</h1><a href="/orders">Back to Orders</a><br><br>`;
-  
-  result.rows.forEach(batch => {
-    html += `
-      <div style="background:white; padding:15px; border:1px solid #ddd; margin-bottom:10px; border-radius:8px;">
-        <strong>${batch.name}</strong> - ${batch.order_ids.split(',').length} Orders
-        <br><small>Created: ${batch.created_at.toLocaleString()}</small>
-        <br><button disabled>Download PDF (Coming Soon)</button>
-      </div>
+  try {
+    const result = await pool.query("SELECT * FROM batches ORDER BY created_at DESC");
+    
+    let html = `
+      <style>
+        body { font-family: sans-serif; padding: 30px; background: #f6f6f7; }
+        .batch-card { background: white; padding: 20px; border-radius: 8px; border: 1px solid #ddd; margin-bottom: 15px; }
+        .btn { display: inline-block; padding: 8px 15px; border-radius: 5px; text-decoration: none; font-size: 14px; margin-top: 10px; }
+        .btn-blue { background: #007ace; color: white; }
+      </style>
+      <h1>📜 Saved Batches</h1>
+      <a href="/orders">← Back to Selection</a><br><br>
     `;
-  });
-  res.send(html);
+    
+    result.rows.forEach(batch => {
+      html += `
+        <div class="batch-card">
+          <strong>${batch.name}</strong><br>
+          <small>Orders: ${batch.order_ids}</small><br>
+          <a href="#" class="btn btn-blue" onclick="alert('PDF Generator coming in next update!')">Download PDF</a>
+        </div>
+      `;
+    });
+    
+    res.send(html);
+  } catch (err) {
+    res.status(500).send("Error loading batches: " + err.message);
+  }
 });
 
-app.listen(PORT, '0.0.0.0', () => console.log(`Running on ${PORT}`));
+// 5. START SERVER
+app.listen(PORT, '0.0.0.0', () => {
+  console.log(`App running on port ${PORT}`);
+});

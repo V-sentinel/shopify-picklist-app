@@ -20,6 +20,7 @@ const pool = new Pool({
   ssl: { rejectUnauthorized: false }
 });
 
+// Test DB
 pool.query("SELECT NOW()")
   .then(() => console.log("✅ DB Connected"))
   .catch(err => console.error("❌ DB Error:", err));
@@ -28,11 +29,9 @@ pool.query("SELECT NOW()")
 let cachedToken = null;
 let tokenExpiry = 0;
 
-// ================= GET ACCESS TOKEN =================
+// ================= GET TOKEN =================
 async function getAccessToken() {
   if (cachedToken && Date.now() < tokenExpiry) return cachedToken;
-
-  console.log("🔄 Generating new Shopify token...");
 
   const response = await fetch(`https://${SHOP}.myshopify.com/admin/oauth/access_token`, {
     method: "POST",
@@ -50,21 +49,17 @@ async function getAccessToken() {
   const data = await response.json();
 
   if (!data.access_token) {
-    console.error("❌ Token Error:", data);
-    throw new Error("Failed to generate token");
+    console.error(data);
+    throw new Error("Token generation failed");
   }
 
   cachedToken = data.access_token;
-
-  // Shopify may or may not return expiry → safe fallback
-  tokenExpiry = Date.now() + (data.expires_in ? (data.expires_in - 60) * 1000 : 3600 * 1000);
-
-  console.log("✅ Token Generated");
+  tokenExpiry = Date.now() + 3600 * 1000;
 
   return cachedToken;
 }
 
-// ================= SHOPIFY API =================
+// ================= FETCH ORDERS =================
 async function getOrders() {
   const token = await getAccessToken();
 
@@ -72,20 +67,30 @@ async function getOrders() {
     `https://${SHOP}.myshopify.com/admin/api/2024-04/orders.json?status=unfulfilled&limit=50`,
     {
       headers: {
-        "X-Shopify-Access-Token": token,
-        "Content-Type": "application/json"
+        "X-Shopify-Access-Token": token
       }
     }
   );
 
   const data = await response.json();
+  return data.orders || [];
+}
 
-  if (!data.orders) {
-    console.error("❌ Shopify API Error:", data);
-    throw new Error("Failed to fetch orders");
-  }
+// ================= FETCH ORDERS BY IDS =================
+async function getOrdersByIds(ids) {
+  const token = await getAccessToken();
 
-  return data.orders;
+  const response = await fetch(
+    `https://${SHOP}.myshopify.com/admin/api/2024-04/orders.json?ids=${ids.join(",")}`,
+    {
+      headers: {
+        "X-Shopify-Access-Token": token
+      }
+    }
+  );
+
+  const data = await response.json();
+  return data.orders || [];
 }
 
 // ================= ROUTES =================
@@ -93,7 +98,7 @@ async function getOrders() {
 // HOME
 app.get("/", (req, res) => res.redirect("/orders"));
 
-// ================= ORDERS =================
+// ================= ORDERS PAGE =================
 app.get("/orders", async (req, res) => {
   try {
     const orders = await getOrders();
@@ -116,7 +121,7 @@ app.get("/orders", async (req, res) => {
     orders.forEach(order => {
       html += `
       <div class="card">
-        <input type="checkbox" name="orders" value='${JSON.stringify(order)}'>
+        <input type="checkbox" name="orders" value="${order.id}">
         <div style="margin-left:10px;">
           <strong>${order.name}</strong><br/>
           ${order.line_items.map(i => `<span class="sku">${i.sku || "NO-SKU"}</span>`).join("")}
@@ -147,7 +152,8 @@ app.post("/create-batch", async (req, res) => {
 
     if (!Array.isArray(orders)) orders = [orders];
 
-    const parsed = orders.map(o => JSON.parse(o));
+    // ✅ Fetch real order data from Shopify
+    const fullOrders = await getOrdersByIds(orders);
 
     const batchName = `Batch-${Date.now()}`;
 
@@ -162,7 +168,7 @@ app.post("/create-batch", async (req, res) => {
 
     await pool.query(
       "INSERT INTO batches (name, data) VALUES ($1, $2)",
-      [batchName, JSON.stringify(parsed)]
+      [batchName, JSON.stringify(fullOrders)]
     );
 
     res.redirect("/batches");
@@ -230,7 +236,7 @@ app.get("/batch/:id", async (req, res) => {
   res.send(html);
 });
 
-// ================= START =================
+// ================= START SERVER =================
 app.listen(PORT, "0.0.0.0", () => {
   console.log("🚀 App running on port " + PORT);
 });

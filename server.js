@@ -1,181 +1,241 @@
 const express = require("express");
 const fetch = require("node-fetch");
 const { Pool } = require("pg");
-const app = express();
 
-// 1. CONFIGURATION
-const SHOP = process.env.SHOP_NAME;
-const CLIENT_ID = process.env.SHOPIFY_CLIENT_ID;
-const CLIENT_SECRET = process.env.SHOPIFY_CLIENT_SECRET;
+const app = express();
 const PORT = process.env.PORT || 3000;
 
+// ================= CONFIG =================
+const SHOP = process.env.SHOP_NAME;
+const SHOPIFY_TOKEN = process.env.SHOPIFY_ADMIN_TOKEN;
+const DATABASE_URL = process.env.DATABASE_URL;
+
 app.use(express.urlencoded({ extended: true }));
+app.use(express.json());
 
-// 2. DATABASE CONNECTION (Auto-detects SSL needs)
-const isInternal = process.env.DATABASE_URL && process.env.DATABASE_URL.includes("railway.internal");
-
+// ================= DATABASE =================
 const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-  ssl: isInternal ? false : { rejectUnauthorized: false }
+  connectionString: DATABASE_URL,
+  ssl: { rejectUnauthorized: false }
 });
 
-let cachedToken = null;
-let tokenExpiry = 0;
+// Test DB Connection
+pool.query("SELECT NOW()")
+  .then(() => console.log("✅ Database Connected"))
+  .catch(err => console.error("❌ Database Connection Failed:", err));
 
-async function getAccessToken() {
-  if (cachedToken && Date.now() < tokenExpiry) return cachedToken;
-  
-  const response = await fetch(`https://${SHOP}.myshopify.com/admin/oauth/access_token`, {
-    method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body: `grant_type=client_credentials&client_id=${CLIENT_ID}&client_secret=${CLIENT_SECRET}`,
-  });
-  
+// ================= SHOPIFY FETCH =================
+async function getOrders() {
+  const response = await fetch(
+    `https://${SHOP}.myshopify.com/admin/api/2024-04/orders.json?status=unfulfilled&limit=50`,
+    {
+      headers: {
+        "X-Shopify-Access-Token": SHOPIFY_TOKEN,
+        "Content-Type": "application/json"
+      }
+    }
+  );
+
   const data = await response.json();
-  if (!data.access_token) throw new Error("Shopify Auth Failed");
-  
-  cachedToken = data.access_token;
-  tokenExpiry = Date.now() + (data.expires_in - 300) * 1000;
-  return cachedToken;
+  return data.orders || [];
 }
 
-// 3. ROUTES
+// ================= ROUTES =================
 
-// HOME REDIRECT
-app.get("/", (req, res) => {
-  res.redirect("/orders");
-});
+// HOME
+app.get("/", (req, res) => res.redirect("/orders"));
 
-// MAIN ORDERS VIEW
+// ================= ORDERS PAGE =================
 app.get("/orders", async (req, res) => {
   try {
-    const token = await getAccessToken();
-    const response = await fetch(
-      `https://${SHOP}.myshopify.com/admin/api/2024-04/orders.json?status=unfulfilled&limit=50`,
-      { headers: { "X-Shopify-Access-Token": token } }
-    );
-    const data = await response.json();
-    const orders = data.orders || [];
+    const orders = await getOrders();
 
     let html = `
-      <style>
-        :root { --primary: #008060; --bg: #f6f6f7; }
-        body { font-family: -apple-system, sans-serif; background: var(--bg); padding: 20px; margin: 0; }
-        .header { background: white; padding: 20px; border-bottom: 1px solid #ddd; position: sticky; top: 0; display: flex; justify-content: space-between; align-items: center; z-index: 10; }
-        .card { background: white; border-radius: 10px; padding: 15px; margin: 15px 0; border: 1px solid #ddd; display: flex; align-items: center; box-shadow: 0 2px 4px rgba(0,0,0,0.05); }
-        .order-info { flex-grow: 1; margin-left: 15px; }
-        .sku-tag { background: #eee; padding: 2px 6px; border-radius: 4px; font-size: 11px; margin-right: 5px; }
-        .batch-btn { background: var(--primary); color: white; border: none; padding: 12px 24px; border-radius: 8px; font-weight: bold; cursor: pointer; }
-        input[type="checkbox"] { transform: scale(1.5); cursor: pointer; }
-        .nav-links { padding: 10px 0; }
-      </style>
+    <style>
+      body { font-family: -apple-system, sans-serif; background:#f6f6f7; padding:20px; }
+      .header { display:flex; justify-content:space-between; align-items:center; }
+      .card { background:white; padding:15px; margin:10px 0; border-radius:10px; display:flex; align-items:center; }
+      .sku { background:#eee; padding:2px 6px; margin-right:5px; border-radius:4px; font-size:11px; }
+      .btn { background:#008060; color:white; padding:10px 20px; border:none; border-radius:8px; cursor:pointer; }
+    </style>
 
-      <div class="header">
-        <h1>📦 Picklist</h1>
-        <div class="nav-links"><a href="/batches">View Saved Batches</a></div>
-      </div>
+    <div class="header">
+      <h1>📦 Picklist</h1>
+      <a href="/batches">View Saved</a>
+    </div>
 
-      <form action="/create-batch" method="POST" style="max-width: 800px; margin: auto;">
-        <div style="text-align: right; padding: 10px 0;">
-            <button type="submit" class="batch-btn">Create Batch Picklist</button>
-        </div>
-
-        ${orders.length === 0 ? '<p>No unfulfilled orders found.</p>' : orders.map(order => `
-          <div class="card">
-            <input type="checkbox" name="selected_orders" value="${order.id}">
-            <div class="order-info">
-              <strong>Order ${order.name}</strong>
-              <div style="margin-top:5px;">
-                ${order.line_items.map(i => `<span class="sku-tag">${i.sku || 'No SKU'}</span>`).join('')}
-              </div>
-            </div>
-            <div style="text-align:right">
-                <div style="font-size: 1.2rem; font-weight: bold;">${order.line_items.length}</div>
-                <div style="font-size: 0.7rem; color: #666;">ITEMS</div>
-            </div>
-          </div>
-        `).join('')}
-      </form>
+    <form method="POST" action="/create-batch">
+      <button class="btn">Create Batch Picklist</button>
     `;
+
+    orders.forEach(order => {
+      html += `
+      <div class="card">
+        <input type="checkbox" name="selected_orders" value='${JSON.stringify(order)}'>
+        <div style="margin-left:10px;">
+          <strong>${order.name}</strong><br/>
+          ${order.line_items.map(i => `<span class="sku">${i.sku || "No SKU"}</span>`).join("")}
+        </div>
+        <div style="margin-left:auto;">
+          ${order.line_items.length} ITEMS
+        </div>
+      </div>
+      `;
+    });
+
+    html += `</form>`;
     res.send(html);
+
   } catch (err) {
-    res.status(500).send("Error loading orders: " + err.message);
+    console.error(err);
+    res.send("Error loading orders");
   }
 });
 
-// CREATE BATCH
+// ================= CREATE BATCH =================
 app.post("/create-batch", async (req, res) => {
-  const selectedIds = req.body.selected_orders;
-  if (!selectedIds) return res.send("<script>alert('Select orders first!'); window.history.back();</script>");
-
-  const orderIdsString = Array.isArray(selectedIds) ? selectedIds.join(",") : selectedIds;
-  const batchName = `Batch #${Math.floor(1000 + Math.random() * 9000)}`;
-
   try {
+    let selected = req.body.selected_orders;
+
+    if (!selected) {
+      return res.send("<script>alert('Select orders first'); window.history.back();</script>");
+    }
+
+    // Ensure array
+    if (!Array.isArray(selected)) selected = [selected];
+
+    const parsedOrders = selected.map(o => JSON.parse(o));
+
+    const batchName = `Batch #${Date.now()}`;
+
+    // Create table if not exists
     await pool.query(`
       CREATE TABLE IF NOT EXISTS batches (
         id SERIAL PRIMARY KEY,
         name TEXT,
-        order_ids TEXT,
+        data JSONB,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       );
     `);
 
+    // Insert batch
     await pool.query(
-      "INSERT INTO batches (name, order_ids) VALUES ($1, $2)",
-      [batchName, orderIdsString]
+      "INSERT INTO batches (name, data) VALUES ($1, $2)",
+      [batchName, JSON.stringify(parsedOrders)]
     );
+
     res.redirect("/batches");
+
   } catch (err) {
-    console.error("Save Error Details:", err);
-    res.status(500).send(`
-      <div style="font-family: sans-serif; padding: 40px; text-align: center;">
-        <h1 style="color: #d9534f;">❌ Database Save Error</h1>
-        <p>Your app couldn't save the batch to PostgreSQL.</p>
-        <div style="background: #f8f9fa; border: 1px solid #ddd; padding: 15px; display: inline-block; text-align: left; margin: 20px 0; border-radius: 5px;">
-          <strong>Error Message:</strong> ${err.message || 'Unknown error'}<br>
-          <strong>Error Code:</strong> ${err.code || 'None'}<br>
-          <strong>Detail:</strong> ${err.detail || 'None'}
-        </div>
-        <br><br>
-        <a href="/orders" style="background: #008060; color: white; padding: 10px 20px; border-radius: 5px; text-decoration: none;">Go Back</a>
-      </div>
+    console.error("❌ Batch Save Error:", err);
+
+    res.send(`
+      <h1 style="color:red;">Database Error</h1>
+      <p>${err.message}</p>
+      <a href="/orders">Go Back</a>
     `);
   }
 });
 
-// VIEW BATCHES
+// ================= VIEW BATCHES =================
 app.get("/batches", async (req, res) => {
   try {
     const result = await pool.query("SELECT * FROM batches ORDER BY created_at DESC");
-    
+
     let html = `
-      <style>
-        body { font-family: sans-serif; padding: 30px; background: #f6f6f7; }
-        .batch-card { background: white; padding: 20px; border-radius: 8px; border: 1px solid #ddd; margin-bottom: 15px; }
-        .btn { display: inline-block; padding: 8px 15px; border-radius: 5px; text-decoration: none; font-size: 14px; margin-top: 10px; }
-        .btn-blue { background: #007ace; color: white; }
-      </style>
-      <h1>📜 Saved Batches</h1>
-      <a href="/orders">← Back to Selection</a><br><br>
+    <style>
+      body { font-family:sans-serif; background:#f6f6f7; padding:20px; }
+      .card { background:white; padding:20px; margin-bottom:10px; border-radius:10px; }
+      .btn { background:#007ace; color:white; padding:8px 15px; border-radius:5px; text-decoration:none; }
+    </style>
+
+    <h1>📜 Saved Picklists</h1>
+    <a href="/orders">← Back</a><br/><br/>
     `;
-    
+
     result.rows.forEach(batch => {
+      const orders = batch.data;
+
       html += `
-        <div class="batch-card">
-          <strong>${batch.name}</strong><br>
-          <small>Orders: ${batch.order_ids}</small><br>
-          <a href="#" class="btn btn-blue" onclick="alert('PDF Generator coming in next update!')">Download PDF</a>
-        </div>
+      <div class="card">
+        <strong>${batch.name}</strong><br/>
+        Orders: ${orders.length}<br/><br/>
+        <a class="btn" href="/batch/${batch.id}">View Picklist</a>
+      </div>
       `;
     });
-    
+
     res.send(html);
+
   } catch (err) {
-    res.status(500).send("Error loading batches: " + err.message);
+    res.send("Error loading batches");
   }
 });
 
-app.listen(PORT, '0.0.0.0', () => {
-  console.log(`App running on port ${PORT}`);
+// ================= VIEW SINGLE PICKLIST =================
+app.get("/batch/:id", async (req, res) => {
+  try {
+    const result = await pool.query("SELECT * FROM batches WHERE id=$1", [req.params.id]);
+
+    if (result.rows.length === 0) return res.send("Batch not found");
+
+    const batch = result.rows[0];
+    const orders = batch.data;
+
+    // SKU aggregation
+    const skuMap = {};
+
+    orders.forEach(order => {
+      order.line_items.forEach(item => {
+        const sku = item.sku || "NO-SKU";
+        if (!skuMap[sku]) {
+          skuMap[sku] = {
+            name: item.name,
+            qty: 0
+          };
+        }
+        skuMap[sku].qty += item.quantity;
+      });
+    });
+
+    let html = `
+    <style>
+      body { font-family:sans-serif; padding:20px; }
+      table { width:100%; border-collapse:collapse; }
+      th, td { border:1px solid #ddd; padding:10px; text-align:left; }
+      th { background:#008060; color:white; }
+    </style>
+
+    <h1>${batch.name}</h1>
+    <a href="/batches">← Back</a><br/><br/>
+
+    <table>
+      <tr>
+        <th>SKU</th>
+        <th>Product</th>
+        <th>Total Qty</th>
+      </tr>
+    `;
+
+    Object.keys(skuMap).forEach(sku => {
+      html += `
+      <tr>
+        <td>${sku}</td>
+        <td>${skuMap[sku].name}</td>
+        <td>${skuMap[sku].qty}</td>
+      </tr>
+      `;
+    });
+
+    html += `</table>`;
+    res.send(html);
+
+  } catch (err) {
+    res.send("Error loading picklist");
+  }
+});
+
+// ================= START SERVER =================
+app.listen(PORT, "0.0.0.0", () => {
+  console.log(`🚀 App running on port ${PORT}`);
 });

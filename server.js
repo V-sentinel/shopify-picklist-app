@@ -9,13 +9,13 @@ const PORT = process.env.PORT || 3000;
 const SHOP = process.env.SHOP_NAME?.trim();
 const CLIENT_ID = process.env.SHOPIFY_CLIENT_ID?.trim();
 const CLIENT_SECRET = process.env.SHOPIFY_CLIENT_SECRET?.trim();
-const DATABASE_URL = process.env.DATABASE_URL || process.env.DATABASE_PRIVATE_URL || process.env.DATABASE_PUBLIC_URL;
+const DATABASE_URL = process.env.DATABASE_URL || 
+                     process.env.DATABASE_PRIVATE_URL || 
+                     process.env.DATABASE_PUBLIC_URL;
 
-console.log("🔧 Starting Picklist App v2026 (Stable Version)");
-console.log("SHOP_NAME:", SHOP ? "✅ Set" : "❌ MISSING");
-console.log("SHOPIFY_CLIENT_ID:", CLIENT_ID ? "✅ Set" : "❌ MISSING");
-console.log("SHOPIFY_CLIENT_SECRET:", CLIENT_SECRET ? "✅ Set" : "❌ MISSING");
-console.log("DATABASE_URL (any variant):", DATABASE_URL ? "✅ Found" : "❌ MISSING - This was causing the crash!");
+console.log("🔧 Starting Picklist App...");
+console.log("DATABASE_URL found:", DATABASE_URL ? "✅ Yes" : "❌ No");
+console.log("Using:", DATABASE_URL ? DATABASE_URL.substring(0, 60) + "..." : "None");
 
 if (!SHOP || !CLIENT_ID || !CLIENT_SECRET) {
   console.error("❌ Missing Shopify credentials. App may fail on /orders route.");

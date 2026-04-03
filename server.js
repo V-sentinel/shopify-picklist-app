@@ -24,34 +24,49 @@ if (!SHOP || !CLIENT_ID || !CLIENT_SECRET || !_URL) {
 app.use(express.urlencoded({ extended: true }));
 app.use(express.json());
 
-// ================= DATABASE (Improved) =================
+// ================= DATABASE (Optimized & Safe) =================
 const pool = new Pool({
-  connectionString: DATABASE_URL,
+  connectionString: DATABASE_URL || process.env.DATABASE_PRIVATE_URL,  // fallback
   ssl: { rejectUnauthorized: false },
-  max: 10,                    // connection pool size
-  idleTimeoutMillis: 30000,
-  connectionTimeoutMillis: 10000,
+  max: 8,                          // Safe starting value for single replica
+  idleTimeoutMillis: 30000,        // Close idle connections
+  connectionTimeoutMillis: 8000,   // Fail faster instead of hanging
+  allowExitOnIdle: true,
 });
 
 async function initDB() {
-  try {
-    // Test the connection
-    const client = await pool.connect();
-    await client.query(`
-      CREATE TABLE IF NOT EXISTS batches (
-        id SERIAL PRIMARY KEY,
-        name TEXT,
-        data JSONB,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-      );
-    `);
-    client.release();
-    console.log("✅ Database Connected & Table Ready");
-  } catch (err) {
-    console.error("❌ Database Connection Failed:", err.message);
-    console.error("   Make sure DATABASE_URL is correctly linked to Postgres service");
+  let retries = 3;
+  while (retries > 0) {
+    try {
+      const client = await pool.connect();
+      await client.query(`
+        CREATE TABLE IF NOT EXISTS batches (
+          id SERIAL PRIMARY KEY,
+          name TEXT,
+          data JSONB,
+          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+      `);
+      // Optional: Add useful index
+      await client.query(`CREATE INDEX IF NOT EXISTS idx_batches_created_at ON batches(created_at DESC);`);
+      
+      client.release();
+      console.log("✅ Database Connected Successfully + Table & Index Ready");
+      return;
+    } catch (err) {
+      retries--;
+      console.error(`❌ DB Connection Attempt Failed (${3-retries}/3):`, err.message);
+      if (retries > 0) {
+        console.log("   Retrying in 3 seconds...");
+        await new Promise(res => setTimeout(res, 3000));
+      } else {
+        console.error("❌ Database connection failed after retries. Check Variables → DATABASE_URL references Postgres correctly.");
+      }
+    }
   }
 }
+
+// Call it at startup
 initDB();
 
 // ================= TOKEN CACHE (Client Credentials) =================

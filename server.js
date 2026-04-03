@@ -17,22 +17,27 @@ console.log("SHOPIFY_CLIENT_ID:", CLIENT_ID ? "✅ Set" : "❌ MISSING");
 console.log("SHOPIFY_CLIENT_SECRET:", CLIENT_SECRET ? "✅ Set" : "❌ MISSING");
 console.log("DATABASE_URL:", DATABASE_URL ? "✅ Set" : "❌ MISSING");
 
-if (!SHOP || !CLIENT_ID || !CLIENT_SECRET || !DATABASE_URL) {
+if (!SHOP || !CLIENT_ID || !CLIENT_SECRET || !_URL) {
   console.error("❌ Missing required environment variables. Check Railway Variables.");
 }
 
 app.use(express.urlencoded({ extended: true }));
 app.use(express.json());
 
-// ================= DATABASE =================
+// ================= DATABASE (Improved) =================
 const pool = new Pool({
   connectionString: DATABASE_URL,
-  ssl: { rejectUnauthorized: false }
+  ssl: { rejectUnauthorized: false },
+  max: 10,                    // connection pool size
+  idleTimeoutMillis: 30000,
+  connectionTimeoutMillis: 10000,
 });
 
 async function initDB() {
   try {
-    await pool.query(`
+    // Test the connection
+    const client = await pool.connect();
+    await client.query(`
       CREATE TABLE IF NOT EXISTS batches (
         id SERIAL PRIMARY KEY,
         name TEXT,
@@ -40,9 +45,11 @@ async function initDB() {
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       );
     `);
-    console.log("✅ Database Table Ready");
+    client.release();
+    console.log("✅ Database Connected & Table Ready");
   } catch (err) {
-    console.error("❌ DB Error:", err.message);
+    console.error("❌ Database Connection Failed:", err.message);
+    console.error("   Make sure DATABASE_URL is correctly linked to Postgres service");
   }
 }
 initDB();

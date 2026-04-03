@@ -1,18 +1,24 @@
 const express = require("express");
 const fetch = require("node-fetch");
 const { Pool } = require("pg");
+
 const app = express();
 const PORT = process.env.PORT || 3000;
 
 // ================= CONFIG =================
-const SHOP = process.env.SHOP_NAME;
-const CLIENT_ID = process.env.SHOPIFY_CLIENT_ID;
-const CLIENT_SECRET = process.env.SHOPIFY_CLIENT_SECRET;
-const DATABASE_URL = process.env.DATABASE_URL;
+const SHOP = process.env.SHOP_NAME?.trim();
+const ACCESS_TOKEN = process.env.SHOPIFY_ACCESS_TOKEN?.trim();
+const DATABASE_URL = process.env.DATABASE_URL?.trim();
 
-if (!SHOP || !CLIENT_ID || !CLIENT_SECRET || !DATABASE_URL) {
-  console.error("❌ Missing required environment variables!");
-  process.exit(1);
+console.log("🔧 Starting Picklist App...");
+console.log("SHOP_NAME:", SHOP ? "✅ Set" : "❌ MISSING");
+console.log("SHOPIFY_ACCESS_TOKEN:", ACCESS_TOKEN ? "✅ Set" : "❌ MISSING");
+console.log("DATABASE_URL:", DATABASE_URL ? "✅ Set" : "❌ MISSING");
+
+if (!SHOP || !ACCESS_TOKEN || !DATABASE_URL) {
+  console.error("❌ CRITICAL: Missing one or more required environment variables.");
+  console.error("Please add SHOP_NAME, SHOPIFY_ACCESS_TOKEN, and ensure DATABASE_URL is present.");
+  // Do NOT exit - show helpful page instead
 }
 
 app.use(express.urlencoded({ extended: true }));
@@ -24,7 +30,7 @@ const pool = new Pool({
   ssl: { rejectUnauthorized: false }
 });
 
-// Initialize Database
+// Initialize Database Table
 async function initDB() {
   try {
     await pool.query(`
@@ -42,32 +48,12 @@ async function initDB() {
 }
 initDB();
 
-// ================= TOKEN CACHE =================
-let cachedToken = null;
-let tokenExpiry = 0;
-
+// ================= ACCESS TOKEN (Permanent - Recommended) =================
 async function getAccessToken() {
-  if (cachedToken && Date.now() < tokenExpiry) return cachedToken;
-
-  const response = await fetch(`https://${SHOP}.myshopify.com/admin/oauth/access_token`, {
-    method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body: new URLSearchParams({
-      client_id: CLIENT_ID,
-      client_secret: CLIENT_SECRET,
-      grant_type: "client_credentials"
-    })
-  });
-
-  const data = await response.json();
-  if (!data.access_token) {
-    console.error("❌ Shopify Auth Error:", data);
-    throw new Error("Token generation failed. Check your SHOP_NAME, CLIENT_ID and CLIENT_SECRET.");
+  if (!ACCESS_TOKEN) {
+    throw new Error("SHOPIFY_ACCESS_TOKEN is missing. Add it in Railway Variables.");
   }
-
-  cachedToken = data.access_token;
-  tokenExpiry = Date.now() + 3500 * 1000; // ~1 hour with buffer
-  return cachedToken;
+  return ACCESS_TOKEN;
 }
 
 // ================= FETCH ORDERS =================
@@ -77,6 +63,13 @@ async function getOrders() {
     `https://${SHOP}.myshopify.com/admin/api/2024-04/orders.json?status=unfulfilled&limit=50`,
     { headers: { "X-Shopify-Access-Token": token } }
   );
+
+  if (!response.ok) {
+    const errText = await response.text();
+    console.error("Shopify Orders Error:", response.status, errText);
+    throw new Error(`Shopify API error: ${response.status}`);
+  }
+
   const data = await response.json();
   return data.orders || [];
 }
@@ -87,6 +80,8 @@ async function getOrdersByIds(ids) {
     `https://${SHOP}.myshopify.com/admin/api/2024-04/orders.json?ids=${ids.join(",")}`,
     { headers: { "X-Shopify-Access-Token": token } }
   );
+
+  if (!response.ok) throw new Error(`Shopify API error: ${response.status}`);
   const data = await response.json();
   return data.orders || [];
 }
@@ -94,14 +89,13 @@ async function getOrdersByIds(ids) {
 // ================= ROUTES =================
 app.get("/", (req, res) => res.redirect("/orders"));
 
-// ORDERS PAGE - Beautiful UI
+// Beautiful Orders Page
 app.get("/orders", async (req, res) => {
   try {
     const orders = await getOrders();
-    const search = (req.query.search || "").toLowerCase();
+    // ... (the full beautiful HTML from previous version remains the same)
 
-    let html = `
-    <!DOCTYPE html>
+    let html = `<!DOCTYPE html>
     <html lang="en">
     <head>
       <meta charset="UTF-8">
@@ -143,18 +137,12 @@ app.get("/orders", async (req, res) => {
           <div class="grid gap-4" id="ordersContainer">
     `;
 
-    const filteredOrders = orders.filter(order => 
-      !search || 
-      order.name.toLowerCase().includes(search) ||
-      (order.customer?.first_name + " " + order.customer?.last_name).toLowerCase().includes(search)
-    );
-
-    if (filteredOrders.length === 0) {
-      html += `<p class="text-gray-500 text-center py-12">No unfulfilled orders found.</p>`;
+    if (orders.length === 0) {
+      html += `<p class="text-gray-500 text-center py-12">No unfulfilled orders found or Shopify connection issue.</p>`;
     } else {
-      filteredOrders.forEach(order => {
-        const customer = order.customer ? `${order.customer.first_name} ${order.customer.last_name}` : "No customer";
-        const totalItems = order.line_items.reduce((sum, i) => sum + i.quantity, 0);
+      orders.forEach(order => {
+        const customer = order.customer ? `${order.customer.first_name || ''} ${order.customer.last_name || ''}`.trim() || "No customer" : "No customer";
+        const totalItems = order.line_items.reduce((sum, i) => sum + (i.quantity || 0), 0);
         const totalPrice = order.total_price_set?.shop_money?.amount || "0.00";
 
         html += `
@@ -163,7 +151,7 @@ app.get("/orders", async (req, res) => {
           <div class="flex-1">
             <div class="flex items-center justify-between">
               <strong class="text-xl">${order.name}</strong>
-              <span class="text-emerald-600 font-medium">₹${totalPrice}</span>
+              <span class="text-emerald-600 font-medium">₹${parseFloat(totalPrice).toFixed(2)}</span>
             </div>
             <p class="text-gray-600">${customer} • ${new Date(order.created_at).toLocaleDateString('en-IN')}</p>
             <div class="flex flex-wrap gap-2 mt-3">
@@ -192,13 +180,11 @@ app.get("/orders", async (req, res) => {
           checkboxes.forEach(cb => cb.checked = !allChecked);
         }
 
-        // Live search
         document.getElementById('searchInput').addEventListener('input', function(e) {
           const term = e.target.value.toLowerCase();
           const cards = document.querySelectorAll('.card');
           cards.forEach(card => {
-            const text = card.textContent.toLowerCase();
-            card.style.display = text.includes(term) ? 'flex' : 'none';
+            card.style.display = card.textContent.toLowerCase().includes(term) ? 'flex' : 'none';
           });
         });
       </script>
@@ -207,12 +193,18 @@ app.get("/orders", async (req, res) => {
 
     res.send(html);
   } catch (err) {
-    console.error(err);
-    res.status(500).send(`<h1 class="text-red-600 p-10">Error loading orders: ${err.message}</h1>`);
+    console.error("Orders Route Error:", err.message);
+    res.status(500).send(`
+      <h1 style="color:red; padding:40px; font-family:sans-serif;">
+        Error: ${err.message}<br><br>
+        Check Railway Logs for details.<br>
+        Make sure SHOPIFY_ACCESS_TOKEN is correctly set.
+      </h1>
+    `);
   }
 });
 
-// CREATE BATCH
+// CREATE BATCH, /batches, /batch/:id, DELETE - (same as previous improved version)
 app.post("/create-batch", async (req, res) => {
   try {
     let orderIds = req.body.orders;
@@ -230,11 +222,10 @@ app.post("/create-batch", async (req, res) => {
     res.redirect("/batches");
   } catch (err) {
     console.error("Create Batch Error:", err);
-    res.status(500).send("Database Error: " + err.message);
+    res.status(500).send("Error: " + err.message);
   }
 });
 
-// VIEW ALL BATCHES
 app.get("/batches", async (req, res) => {
   try {
     const result = await pool.query("SELECT * FROM batches ORDER BY created_at DESC");
@@ -245,9 +236,7 @@ app.get("/batches", async (req, res) => {
     <body class="bg-gray-50 p-8">
       <div class="max-w-4xl mx-auto">
         <h1 class="text-4xl font-bold mb-6">📋 Saved Picklists</h1>
-        <a href="/orders" class="text-emerald-600 hover:underline mb-8 inline-flex items-center gap-2">
-          ← Back to Orders
-        </a>
+        <a href="/orders" class="text-emerald-600 hover:underline mb-8 inline-flex items-center gap-2">← Back to Orders</a>
     `;
 
     if (result.rows.length === 0) {
@@ -269,21 +258,22 @@ app.get("/batches", async (req, res) => {
         </div>`;
       });
     }
-
     html += `</div></body></html>`;
     res.send(html);
   } catch (err) {
-    res.status(500).send("Error: " + err.message);
+    res.status(500).send("Database Error: " + err.message);
   }
 });
 
-// DELETE BATCH
 app.post("/delete-batch/:id", async (req, res) => {
-  await pool.query("DELETE FROM batches WHERE id = $1", [req.params.id]);
-  res.redirect("/batches");
+  try {
+    await pool.query("DELETE FROM batches WHERE id = $1", [req.params.id]);
+    res.redirect("/batches");
+  } catch (err) {
+    res.status(500).send("Delete Error: " + err.message);
+  }
 });
 
-// VIEW SINGLE PICKLIST (Print friendly)
 app.get("/batch/:id", async (req, res) => {
   try {
     const result = await pool.query("SELECT * FROM batches WHERE id=$1", [req.params.id]);
@@ -296,15 +286,16 @@ app.get("/batch/:id", async (req, res) => {
       order.line_items.forEach(item => {
         const sku = item.sku || "NO-SKU";
         if (!skuMap[sku]) skuMap[sku] = { name: item.name, qty: 0 };
-        skuMap[sku].qty += item.quantity;
+        skuMap[sku].qty += item.quantity || 0;
       });
     });
 
     const sortedSKUs = Object.keys(skuMap).sort();
+    let grandTotal = 0;
 
     let html = `
     <!DOCTYPE html>
-    <html><head><meta charset="UTF-8"><title>Picklist #${req.params.id}</title>
+    <html><head><meta charset="UTF-8"><title>Picklist</title>
     <script src="https://cdn.tailwindcss.com"></script></head>
     <body class="bg-white p-8 max-w-4xl mx-auto">
       <div class="flex justify-between items-center mb-8">
@@ -326,7 +317,6 @@ app.get("/batch/:id", async (req, res) => {
         <tbody>
     `;
 
-    let grandTotal = 0;
     sortedSKUs.forEach(sku => {
       const qty = skuMap[sku].qty;
       grandTotal += qty;
@@ -347,7 +337,6 @@ app.get("/batch/:id", async (req, res) => {
           </tr>
         </tfoot>
       </table>
-
       <div class="mt-12 text-center text-gray-400 text-sm">
         Generated on ${new Date().toLocaleString('en-IN')}
       </div>
@@ -360,5 +349,6 @@ app.get("/batch/:id", async (req, res) => {
 });
 
 app.listen(PORT, "0.0.0.0", () => {
-  console.log(`🚀 Picklist app running on port ${PORT}`);
+  console.log(`🚀 Picklist app is running on port ${PORT}`);
+  console.log(`🌐 Open your app URL and go to /orders`);
 });

@@ -13,18 +13,17 @@ const DATABASE_URL = process.env.DATABASE_URL;
 
 if (!DATABASE_URL) {
   console.error("❌ DATABASE_URL is missing!");
-  process.exit(1); // stop app immediately
+} else {
+  console.log("✅ DATABASE_URL found");
 }
-
-console.log("✅ DATABASE_URL found");
 
 const pool = new Pool({
   connectionString: DATABASE_URL,
   ssl: { rejectUnauthorized: false }
 });
 
-// ================= INIT DB =================
-async function initDB() {
+// ================= INIT DB WITH RETRY =================
+async function initDB(retries = 5) {
   try {
     const client = await pool.connect();
 
@@ -39,9 +38,17 @@ async function initDB() {
     client.release();
 
     console.log("✅ Database connected & table ready");
+
   } catch (err) {
-    console.error("❌ DB INIT ERROR:", err);
-    process.exit(1); // stop app if DB fails
+    console.error("❌ DB INIT ERROR:", err.message);
+
+    if (retries > 0) {
+      console.log(`🔄 Retrying DB connection... (${retries} left)`);
+      await new Promise(res => setTimeout(res, 2000));
+      return initDB(retries - 1);
+    } else {
+      console.error("❌ Could not connect to DB after retries");
+    }
   }
 }
 
@@ -49,7 +56,7 @@ async function initDB() {
 async function startServer() {
   await initDB();
 
-  app.listen(PORT, () => {
+  app.listen(PORT, "0.0.0.0", () => {
     console.log("🚀 App running on port " + PORT);
   });
 }

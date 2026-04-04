@@ -9,18 +9,46 @@ app.use(express.urlencoded({ extended: true }));
 app.use(express.json());
 
 // ================= DATABASE =================
-const DATABASE_URL = process.env.DATABASE_URL;
+const DATABASE_URL = process.env.DATABASE_PRIVATE_URL || process.env.DATABASE_URL;
 
 if (!DATABASE_URL) {
-  console.error("❌ DATABASE_URL is missing!");
+  console.error("❌ DATABASE_PRIVATE_URL / DATABASE_URL is missing!");
 } else {
-  console.log("✅ DATABASE_URL found");
+  console.log("✅ Database URL found");
 }
 
 const pool = new Pool({
   connectionString: DATABASE_URL,
-  ssl: { rejectUnauthorized: false }
+  ssl: { rejectUnauthorized: false },
+  // Keep connections alive and surface failures quickly
+  connectionTimeoutMillis: 5000,   // fail fast if a new connection can't be established
+  idleTimeoutMillis: 30000,        // release idle connections after 30 s
+  max: 10,                         // maximum pool size
 });
+
+// Surface pool-level errors so they don't crash the process silently
+pool.on("error", (err, client) => {
+  console.error("❌ Unexpected pool client error:", err.message);
+});
+
+pool.on("connect", () => {
+  console.log("🔗 New database client connected");
+});
+
+// ================= QUERY HELPER =================
+// Acquires a fresh client for every query so we can validate the connection
+// before executing and release it immediately after, avoiding stale sockets.
+async function dbQuery(text, params) {
+  const client = await pool.connect();
+  try {
+    // Lightweight ping to confirm the connection is alive before running the
+    // real query — catches stale sockets that the pool hasn't evicted yet.
+    await client.query("SELECT 1");
+    return await client.query(text, params);
+  } finally {
+    client.release();
+  }
+}
 
 // ================= INIT DB WITH RETRY =================
 async function initDB(retries = 5) {
@@ -63,6 +91,25 @@ async function startServer() {
 
 startServer();
 
+// ================= HEALTH CHECK =================
+app.get("/health", async (req, res) => {
+  try {
+    const result = await dbQuery("SELECT NOW() AS now");
+    res.json({
+      status: "ok",
+      db: "connected",
+      timestamp: result.rows[0].now,
+    });
+  } catch (err) {
+    console.error("❌ HEALTH CHECK ERROR:", err.message);
+    res.status(503).json({
+      status: "error",
+      db: "unreachable",
+      message: err.message,
+    });
+  }
+});
+
 // ================= UI =================
 app.get("/", (req, res) => {
   res.send(`
@@ -73,6 +120,8 @@ app.get("/", (req, res) => {
     </form>
     <br/>
     <a href="/data">View Data</a>
+    &nbsp;|&nbsp;
+    <a href="/health">Health Check</a>
   `);
 });
 
@@ -87,7 +136,7 @@ app.post("/save", async (req, res) => {
 
     console.log("➡️ Saving value:", value);
 
-    const result = await pool.query(
+    const result = await dbQuery(
       "INSERT INTO test_data (value) VALUES ($1) RETURNING *",
       [value]
     );
@@ -114,7 +163,7 @@ app.post("/save", async (req, res) => {
 // ================= VIEW DATA =================
 app.get("/data", async (req, res) => {
   try {
-    const result = await pool.query("SELECT * FROM test_data ORDER BY id DESC");
+    const result = await dbQuery("SELECT * FROM test_data ORDER BY id DESC");
 
     let html = "<h1>Saved Data</h1><a href='/'>Back</a><br><br>";
 

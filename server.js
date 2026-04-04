@@ -1,21 +1,127 @@
+const express = require("express");
+const { Pool } = require("pg");
+
+const app = express();
+const PORT = process.env.PORT || 3000;
+
+// Middleware
+app.use(express.urlencoded({ extended: true }));
+app.use(express.json());
+
+// ================= DATABASE =================
+const DATABASE_URL = process.env.DATABASE_URL;
+
+if (!DATABASE_URL) {
+  console.error("❌ DATABASE_URL is missing!");
+  process.exit(1); // stop app immediately
+}
+
+console.log("✅ DATABASE_URL found");
+
+const pool = new Pool({
+  connectionString: DATABASE_URL,
+  ssl: { rejectUnauthorized: false }
+});
+
+// ================= INIT DB =================
+async function initDB() {
+  try {
+    const client = await pool.connect();
+
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS test_data (
+        id SERIAL PRIMARY KEY,
+        value TEXT,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      );
+    `);
+
+    client.release();
+
+    console.log("✅ Database connected & table ready");
+  } catch (err) {
+    console.error("❌ DB INIT ERROR:", err);
+    process.exit(1); // stop app if DB fails
+  }
+}
+
+// ================= START SERVER =================
+async function startServer() {
+  await initDB();
+
+  app.listen(PORT, () => {
+    console.log("🚀 App running on port " + PORT);
+  });
+}
+
+startServer();
+
+// ================= UI =================
+app.get("/", (req, res) => {
+  res.send(`
+    <h1>Simple Data App</h1>
+    <form method="POST" action="/save">
+      <input type="text" name="value" placeholder="Enter something (e.g. 123)" />
+      <button type="submit">Save</button>
+    </form>
+    <br/>
+    <a href="/data">View Data</a>
+  `);
+});
+
+// ================= SAVE DATA =================
 app.post("/save", async (req, res) => {
   try {
-    console.log("Saving:", req.body.value);
+    const value = req.body.value;
+
+    if (!value) {
+      return res.send("❌ Please enter something");
+    }
+
+    console.log("➡️ Saving value:", value);
 
     const result = await pool.query(
       "INSERT INTO test_data (value) VALUES ($1) RETURNING *",
-      [req.body.value]
+      [value]
     );
 
-    console.log("Saved:", result.rows[0]);
-
-    res.send("✅ Saved successfully!");
-
-  } catch (err) {
-    console.error("REAL ERROR:", err);
+    console.log("✅ Saved:", result.rows[0]);
 
     res.send(`
-      <h2 style="color:red;">REAL ERROR</h2>
+      <h2>✅ Saved Successfully</h2>
+      <p>Value: ${result.rows[0].value}</p>
+      <a href="/">Go Back</a>
+    `);
+
+  } catch (err) {
+    console.error("❌ SAVE ERROR:", err);
+
+    res.send(`
+      <h2 style="color:red;">DATABASE ERROR</h2>
+      <pre>${err.stack}</pre>
+      <a href="/">Go Back</a>
+    `);
+  }
+});
+
+// ================= VIEW DATA =================
+app.get("/data", async (req, res) => {
+  try {
+    const result = await pool.query("SELECT * FROM test_data ORDER BY id DESC");
+
+    let html = "<h1>Saved Data</h1><a href='/'>Back</a><br><br>";
+
+    result.rows.forEach(row => {
+      html += `<div>ID: ${row.id} | Value: ${row.value}</div>`;
+    });
+
+    res.send(html);
+
+  } catch (err) {
+    console.error("❌ FETCH ERROR:", err);
+
+    res.send(`
+      <h2 style="color:red;">FETCH ERROR</h2>
       <pre>${err.stack}</pre>
     `);
   }

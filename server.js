@@ -1,137 +1,141 @@
 const express = require("express");
 const { Pool } = require("pg");
+const fetch = require("node-fetch");
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Middleware
 app.use(express.urlencoded({ extended: true }));
 app.use(express.json());
 
-// ================= DATABASE =================
+// ================= CONFIG =================
+const SHOP = process.env.SHOPIFY_STORE;
+const TOKEN = process.env.SHOPIFY_ACCESS_TOKEN;
 const DATABASE_URL = process.env.DATABASE_URL;
 
-if (!DATABASE_URL) {
-  console.error("❌ DATABASE_URL is missing!");
-} else {
-  console.log("✅ DATABASE_URL found");
-}
-
+// ================= DATABASE =================
 const pool = new Pool({
   connectionString: DATABASE_URL,
-  ssl: { rejectUnauthorized: false },
-  connectionTimeoutMillis: 5000,
-  idleTimeoutMillis: 30000,
-  max: 10
-});    
-// ================= INIT DB WITH RETRY =================
-async function initDB(retries = 5) {
-  try {
-    const client = await pool.connect();
+  ssl: { rejectUnauthorized: false }
+});
 
-    await client.query(`
-      CREATE TABLE IF NOT EXISTS test_data (
-        id SERIAL PRIMARY KEY,
-        value TEXT,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-      );
-    `);
-
-    client.release();
-
-    console.log("✅ Database connected & table ready");
-
-  } catch (err) {
-    console.error("❌ DB INIT ERROR:", err.message);
-
-    if (retries > 0) {
-      console.log(`🔄 Retrying DB connection... (${retries} left)`);
-      await new Promise(res => setTimeout(res, 2000));
-      return initDB(retries - 1);
-    } else {
-      console.error("❌ Could not connect to DB after retries");
-    }
-  }
+// ================= INIT DB =================
+async function initDB() {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS picklists (
+      id SERIAL PRIMARY KEY,
+      data JSONB,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+  `);
+  console.log("✅ Picklist table ready");
 }
+initDB();
 
-// ================= START SERVER =================
-async function startServer() {
-  await initDB();
-
-  app.listen(PORT, "0.0.0.0", () => {
-    console.log("🚀 App running on port " + PORT);
-  });
-}
-
-startServer();
-
-// ================= UI =================
-app.get("/", (req, res) => {
+// ================= HOME =================
+app.get("/", async (req, res) => {
   res.send(`
-    <h1>Simple Data App</h1>
-    <form method="POST" action="/save">
-      <input type="text" name="value" placeholder="Enter something (e.g. 123)" />
-      <button type="submit">Save</button>
-    </form>
-    <br/>
-    <a href="/data">View Data</a>
+    <h1>Picklist App</h1>
+    <a href="/orders">View Orders</a><br><br>
+    <a href="/picklists">View Picklists</a>
   `);
 });
 
-// ================= SAVE DATA =================
-app.post("/save", async (req, res) => {
+// ================= FETCH ORDERS =================
+app.get("/orders", async (req, res) => {
   try {
-    const value = req.body.value;
-
-    if (!value) {
-      return res.send("❌ Please enter something");
-    }
-
-    console.log("➡️ Saving value:", value);
-
-    const result = await pool.query(
-      "INSERT INTO test_data (value) VALUES ($1) RETURNING *",
-      [value]
+    const response = await fetch(
+      `https://${SHOP}/admin/api/2024-01/orders.json?status=open`,
+      {
+        headers: {
+          "X-Shopify-Access-Token": TOKEN,
+          "Content-Type": "application/json"
+        }
+      }
     );
 
-    console.log("✅ Saved:", result.rows[0]);
+    const data = await response.json();
 
-    res.send(`
-      <h2>✅ Saved Successfully</h2>
-      <p>Value: ${result.rows[0].value}</p>
-      <a href="/">Go Back</a>
-    `);
+    let html = "<h1>Orders</h1><a href='/'>Back</a><br><br>";
 
-  } catch (err) {
-    console.error("❌ SAVE ERROR:", err);
-
-    res.send(`
-      <h2 style="color:red;">DATABASE ERROR</h2>
-      <pre>${err.stack}</pre>
-      <a href="/">Go Back</a>
-    `);
-  }
-});
-
-// ================= VIEW DATA =================
-app.get("/data", async (req, res) => {
-  try {
-    const result = await pool.query("SELECT * FROM test_data ORDER BY id DESC");
-
-    let html = "<h1>Saved Data</h1><a href='/'>Back</a><br><br>";
-
-    result.rows.forEach(row => {
-      html += `<div>ID: ${row.id} | Value: ${row.value}</div>`;
+    data.orders.forEach(order => {
+      html += `
+        <div style="border:1px solid #ccc; padding:10px; margin:10px;">
+          <b>Order #${order.order_number}</b><br>
+          Items: ${order.line_items.length}<br>
+          <a href="/create-picklist/${order.id}">Create Picklist</a>
+        </div>
+      `;
     });
 
     res.send(html);
 
   } catch (err) {
-    console.error("❌ FETCH ERROR:", err);
+    res.send("❌ Error fetching orders " + err.message);
+  }
+});
+
+// ================= CREATE PICKLIST =================
+app.get("/create-picklist/:orderId", async (req, res) => {
+  try {
+    const orderId = req.params.orderId;
+
+    const response = await fetch(
+      `https://${SHOP}/admin/api/2024-01/orders/${orderId}.json`,
+      {
+        headers: {
+          "X-Shopify-Access-Token": TOKEN,
+          "Content-Type": "application/json"
+        }
+      }
+    );
+
+    const data = await response.json();
+    const order = data.order;
+
+    // Save picklist in DB
+    const result = await pool.query(
+      "INSERT INTO picklists (data) VALUES ($1) RETURNING *",
+      [order]
+    );
 
     res.send(`
-      <h2 style="color:red;">FETCH ERROR</h2>
-      <pre>${err.stack}</pre>
+      <h2>✅ Picklist Created</h2>
+      <a href="/picklists">View Picklists</a>
     `);
+
+  } catch (err) {
+    res.send("❌ Error creating picklist " + err.message);
   }
+});
+
+// ================= VIEW PICKLISTS =================
+app.get("/picklists", async (req, res) => {
+  const result = await pool.query(
+    "SELECT * FROM picklists ORDER BY id DESC"
+  );
+
+  let html = "<h1>Picklists</h1><a href='/'>Back</a><br><br>";
+
+  result.rows.forEach(row => {
+    const order = row.data;
+
+    html += `
+      <div style="border:1px solid black; margin:10px; padding:10px;">
+        <b>Order #${order.order_number}</b><br>
+        ${order.line_items.map(item => `
+          <div>
+            ${item.title} - Qty: ${item.quantity}
+          </div>
+        `).join("")}
+      </div>
+    `;
+  });
+
+  res.send(html);
+});
+
+// ================= START =================
+app.listen(PORT, () => {
+  console.log("🚀 Picklist app running on port " + PORT);
 });

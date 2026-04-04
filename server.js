@@ -23,8 +23,7 @@ const pool = new Pool({
   connectionTimeoutMillis: 5000,
   idleTimeoutMillis: 30000,
   max: 10
-});   
-
+});    
 // ================= INIT DB WITH RETRY =================
 async function initDB(retries = 5) {
   try {

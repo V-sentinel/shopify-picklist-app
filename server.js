@@ -13,34 +13,104 @@ const SHOP = process.env.SHOPIFY_STORE;
 const TOKEN = process.env.SHOPIFY_ACCESS_TOKEN;
 const DATABASE_URL = process.env.DATABASE_URL;
 
-// Validate required environment variables
-const requiredEnvVars = ['SHOPIFY_STORE', 'SHOPIFY_ACCESS_TOKEN', 'DATABASE_URL'];
-const missingVars = requiredEnvVars.filter(varName => !process.env[varName]);
+// Track database status
+let dbConnected = false;
+let dbRetryCount = 0;
+const MAX_DB_RETRIES = 5;
+const RETRY_DELAY_MS = 3000;
 
-if (missingVars.length > 0) {
-  console.error(`❌ Missing required environment variables: ${missingVars.join(', ')}`);
-  console.error('Please set them in your .env file or hosting platform settings');
-  if (process.env.NODE_ENV === 'production') {
-    process.exit(1); // Exit in production if misconfigured
+// ================= DATABASE WITH ERROR HANDLING =================
+let pool = null;
+
+function createPool() {
+  if (!DATABASE_URL) {
+    console.error("❌ DATABASE_URL environment variable is not set");
+    return null;
+  }
+
+  try {
+    const newPool = new Pool({
+      connectionString: DATABASE_URL,
+      ssl: DATABASE_URL.includes('localhost') ? false : { rejectUnauthorized: false },
+      max: 10,
+      idleTimeoutMillis: 30000,
+      connectionTimeoutMillis: 5000 // Fail fast if can't connect
+    });
+
+    // Add error handler to the pool
+    newPool.on('error', (err) => {
+      console.error("❌ Database pool error:", err.message);
+      dbConnected = false;
+    });
+
+    return newPool;
+  } catch (err) {
+    console.error("❌ Failed to create database pool:", err.message);
+    return null;
   }
 }
 
-// ================= DATABASE WITH CONNECTION POOL IMPROVEMENTS =================
-const pool = new Pool({
-  connectionString: DATABASE_URL,
-  ssl: { rejectUnauthorized: false },
-  max: 20, // Maximum number of clients in the pool
-  idleTimeoutMillis: 30000, // Close idle clients after 30 seconds
-  connectionTimeoutMillis: 2000 // Return an error after 2 seconds if connection could not be established
-});
+// ================= RETRY CONNECTION WITH BACKOFF =================
+async function connectWithRetry() {
+  if (!DATABASE_URL) {
+    console.error("❌ Cannot connect: DATABASE_URL is missing");
+    console.error("   Please set DATABASE_URL environment variable");
+    return false;
+  }
 
-// Handle database connection errors
-pool.on('error', (err) => {
-  console.error('❌ Unexpected database error:', err);
-});
+  pool = createPool();
+  if (!pool) return false;
 
-// ================= INIT DB =================
+  try {
+    // Try to query the database
+    await pool.query('SELECT NOW()');
+    dbConnected = true;
+    dbRetryCount = 0;
+    console.log("✅ Database connected successfully");
+    
+    // Initialize tables
+    await initDB();
+    return true;
+    
+  } catch (err) {
+    console.error(`❌ Database connection failed (attempt ${dbRetryCount + 1}/${MAX_DB_RETRIES}):`, err.message);
+    
+    if (err.message.includes('password authentication failed')) {
+      console.error("   🔑 PASSWORD AUTHENTICATION FAILED - Please check your DATABASE_URL credentials");
+      console.error("   Format should be: postgresql://username:password@host:port/database");
+      dbConnected = false;
+      return false;
+    }
+    
+    if (err.message.includes('does not exist')) {
+      console.error("   💾 DATABASE DOES NOT EXIST - Please create the database first");
+      dbConnected = false;
+      return false;
+    }
+    
+    dbConnected = false;
+    
+    // Retry logic
+    if (dbRetryCount < MAX_DB_RETRIES) {
+      dbRetryCount++;
+      const delay = RETRY_DELAY_MS * Math.pow(2, dbRetryCount - 1);
+      console.log(`   Retrying in ${delay/1000} seconds...`);
+      await new Promise(resolve => setTimeout(resolve, delay));
+      return connectWithRetry();
+    } else {
+      console.error("❌ Max retries reached. App will run in DEGRADED MODE (database features unavailable)");
+      return false;
+    }
+  }
+}
+
+// ================= INIT DB (only if connected) =================
 async function initDB() {
+  if (!dbConnected || !pool) {
+    console.log("⏳ Database not connected - skipping table initialization");
+    return false;
+  }
+  
   try {
     await pool.query(`
       CREATE TABLE IF NOT EXISTS picklists (
@@ -49,63 +119,46 @@ async function initDB() {
         order_number INTEGER,
         data JSONB,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-      );
+      )
     `);
     
-    // Add index for faster queries
     await pool.query(`
       CREATE INDEX IF NOT EXISTS idx_picklists_created_at 
-      ON picklists(created_at DESC);
+      ON picklists(created_at DESC)
     `);
     
     console.log("✅ Picklist table ready");
+    return true;
   } catch (err) {
-    console.error("❌ Database initialization failed:", err.message);
-    throw err;
+    console.error("❌ Table initialization failed:", err.message);
+    dbConnected = false;
+    return false;
   }
 }
 
-// Test database connection on startup
-async function testDatabaseConnection() {
-  try {
-    await pool.query('SELECT NOW()');
-    console.log("✅ Database connected successfully");
-  } catch (err) {
-    console.error("❌ Database connection failed:", err.message);
-    process.exit(1);
-  }
-}
-
-// ================= HEALTH CHECK ENDPOINT (for server monitoring) =================
+// ================= HEALTH CHECK ENDPOINT =================
 app.get("/health", async (req, res) => {
-  try {
-    // Check database
-    await pool.query('SELECT 1');
-    
-    // Check Shopify API (lightweight check)
-    const shopifyCheck = await fetch(
-      `https://${SHOP}/admin/api/2024-01/shop.json`,
-      {
-        headers: {
-          "X-Shopify-Access-Token": TOKEN,
-          "Content-Type": "application/json"
-        }
-      }
-    );
-    
-    res.status(200).json({
-      status: 'healthy',
-      database: 'connected',
-      shopify: shopifyCheck.ok ? 'connected' : 'error',
-      timestamp: new Date().toISOString()
-    });
-  } catch (err) {
-    res.status(500).json({
-      status: 'unhealthy',
-      error: err.message,
-      timestamp: new Date().toISOString()
-    });
+  let dbStatus = 'unknown';
+  
+  if (pool && dbConnected) {
+    try {
+      await pool.query('SELECT 1');
+      dbStatus = 'connected';
+    } catch (err) {
+      dbStatus = 'disconnected';
+      dbConnected = false;
+    }
+  } else {
+    dbStatus = 'disconnected';
   }
+  
+  res.status(dbStatus === 'connected' ? 200 : 503).json({
+    status: dbStatus === 'connected' ? 'healthy' : 'degraded',
+    database: dbStatus,
+    database_url_configured: !!DATABASE_URL,
+    timestamp: new Date().toISOString(),
+    message: dbStatus !== 'connected' ? 'Database features unavailable. Check DATABASE_URL configuration.' : undefined
+  });
 });
 
 // ================= HOME =================
@@ -122,25 +175,34 @@ app.get("/", async (req, res) => {
         .btn { display: inline-block; background: #007bff; color: white; padding: 10px 15px; 
                text-decoration: none; border-radius: 5px; margin: 5px; }
         .btn:hover { background: #0056b3; }
+        .warning { background: #fff3cd; border-left: 4px solid #ffc107; padding: 15px; margin: 20px 0; }
         h1 { color: #333; }
       </style>
     </head>
     <body>
       <div class="container">
         <h1>📦 Picklist Management App</h1>
+        ${!dbConnected ? `
+          <div class="warning">
+            ⚠️ <strong>Database Disconnected</strong><br>
+            The app is running in degraded mode. Please check your DATABASE_URL environment variable.
+            <a href="/health">Check health status →</a>
+          </div>
+        ` : ''}
         <div class="card">
           <a href="/orders" class="btn">📋 View Open Orders</a>
           <a href="/picklists" class="btn">📄 View Picklists</a>
           <a href="/health" class="btn">💚 Health Check</a>
         </div>
         <p>Server is running on port ${PORT}</p>
+        <p>Database: ${dbConnected ? '✅ Connected' : '❌ Disconnected'}</p>
       </div>
     </body>
     </html>
   `);
 });
 
-// ================= FETCH ORDERS WITH PAGINATION =================
+// ================= FETCH ORDERS =================
 app.get("/orders", async (req, res) => {
   try {
     const limit = req.query.limit || 20;
@@ -177,7 +239,10 @@ app.get("/orders", async (req, res) => {
             Customer: ${order.customer?.first_name || ''} ${order.customer?.last_name || ''}<br>
             Items: ${order.line_items.length}<br>
             Total: $${order.total_price}<br>
-            <a href="/create-picklist/${order.id}" style="display:inline-block; background:#28a745; color:white; padding:5px 10px; margin-top:10px; text-decoration:none; border-radius:5px;">✅ Create Picklist</a>
+            ${dbConnected ? 
+              `<a href="/create-picklist/${order.id}" style="display:inline-block; background:#28a745; color:white; padding:5px 10px; margin-top:10px; text-decoration:none; border-radius:5px;">✅ Create Picklist</a>` :
+              `<span style="color:#999;">⚠️ Database unavailable - cannot create picklist</span>`
+            }
           </div>
         `;
       });
@@ -196,12 +261,21 @@ app.get("/orders", async (req, res) => {
   }
 });
 
-// ================= CREATE PICKLIST =================
+// ================= CREATE PICKLIST (with DB check) =================
 app.get("/create-picklist/:orderId", async (req, res) => {
+  // Check database connection first
+  if (!dbConnected || !pool) {
+    return res.status(503).send(`
+      <h1>⚠️ Database Unavailable</h1>
+      <p>Cannot create picklist because the database is not connected.</p>
+      <p>Please check your DATABASE_URL environment variable and ensure PostgreSQL is running.</p>
+      <a href="/">← Back to Home</a>
+    `);
+  }
+  
   try {
     const orderId = req.params.orderId;
 
-    // Fetch order from Shopify
     const response = await fetch(
       `https://${SHOP}/admin/api/2024-01/orders/${orderId}.json`,
       {
@@ -219,22 +293,6 @@ app.get("/create-picklist/:orderId", async (req, res) => {
     const data = await response.json();
     const order = data.order;
 
-    // Check if picklist already exists for this order
-    const existing = await pool.query(
-      "SELECT id FROM picklists WHERE order_id = $1",
-      [orderId]
-    );
-
-    if (existing.rows.length > 0) {
-      return res.send(`
-        <h2>⚠️ Picklist Already Exists</h2>
-        <p>A picklist for Order #${order.order_number} already exists.</p>
-        <a href="/picklists">View Existing Picklists</a><br>
-        <a href="/orders">← Back to Orders</a>
-      `);
-    }
-
-    // Save picklist in DB with additional metadata
     const result = await pool.query(
       `INSERT INTO picklists (order_id, order_number, data) 
        VALUES ($1, $2, $3) 
@@ -251,8 +309,8 @@ app.get("/create-picklist/:orderId", async (req, res) => {
           ${order.line_items.map(item => `<li>${item.title} - Quantity: ${item.quantity}</li>`).join('')}
         </ul>
       </div>
-      <a href="/picklists" style="display:inline-block; background:#007bff; color:white; padding:10px; margin:5px; text-decoration:none; border-radius:5px;">📄 View All Picklists</a>
-      <a href="/orders" style="display:inline-block; background:#28a745; color:white; padding:10px; margin:5px; text-decoration:none; border-radius:5px;">📋 Back to Orders</a>
+      <a href="/picklists">📄 View All Picklists</a><br>
+      <a href="/orders">📋 Back to Orders</a>
     `);
 
   } catch (err) {
@@ -265,8 +323,17 @@ app.get("/create-picklist/:orderId", async (req, res) => {
   }
 });
 
-// ================= VIEW PICKLISTS =================
+// ================= VIEW PICKLISTS (with DB check) =================
 app.get("/picklists", async (req, res) => {
+  if (!dbConnected || !pool) {
+    return res.status(503).send(`
+      <h1>⚠️ Database Unavailable</h1>
+      <p>Cannot retrieve picklists because the database is not connected.</p>
+      <p>Please check your DATABASE_URL environment variable and ensure PostgreSQL is running.</p>
+      <a href="/">← Back to Home</a>
+    `);
+  }
+  
   try {
     const result = await pool.query(
       "SELECT * FROM picklists ORDER BY id DESC"
@@ -318,31 +385,36 @@ app.get("/picklists", async (req, res) => {
 // ================= GRACEFUL SHUTDOWN =================
 process.on('SIGTERM', async () => {
   console.log('🛑 Received SIGTERM, closing database pool...');
-  await pool.end();
+  if (pool) await pool.end();
   process.exit(0);
 });
 
 process.on('SIGINT', async () => {
   console.log('🛑 Received SIGINT, closing database pool...');
-  await pool.end();
+  if (pool) await pool.end();
   process.exit(0);
 });
 
 // ================= START SERVER =================
 async function startServer() {
-  try {
-    await testDatabaseConnection();
-    await initDB();
-    
-    app.listen(PORT, '0.0.0.0', () => {
-      console.log(`🚀 Picklist app running on port ${PORT}`);
-      console.log(`📍 Local URL: http://localhost:${PORT}`);
-      console.log(`🌍 Server is ready to accept connections`);
-    });
-  } catch (err) {
-    console.error('❌ Failed to start server:', err);
-    process.exit(1);
-  }
+  console.log("🚀 Starting Picklist App...");
+  
+  // Try to connect to database (non-blocking, won't crash app)
+  connectWithRetry().then(connected => {
+    if (connected) {
+      console.log("✅ App fully operational with database");
+    } else {
+      console.log("⚠️ App running in degraded mode without database");
+      console.log("   Set DATABASE_URL to enable picklist storage");
+    }
+  });
+  
+  // Start HTTP server regardless of database status
+  app.listen(PORT, '0.0.0.0', () => {
+    console.log(`🌍 Server running on port ${PORT}`);
+    console.log(`📍 Local URL: http://localhost:${PORT}`);
+    console.log(`📋 Health check: http://localhost:${PORT}/health`);
+  });
 }
 
 startServer();

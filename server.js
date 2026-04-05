@@ -1,3 +1,6 @@
+// Load environment variables FIRST - before anything else
+require('dotenv').config();
+
 const express = require("express");
 const { Pool } = require("pg");
 const fetch = require("node-fetch");
@@ -12,6 +15,28 @@ app.use(express.json());
 const SHOP = process.env.SHOPIFY_STORE;
 const TOKEN = process.env.SHOPIFY_ACCESS_TOKEN;
 const DATABASE_URL = process.env.DATABASE_URL;
+
+// VALIDATE required environment variables at startup
+const missingEnvVars = [];
+if (!SHOP) missingEnvVars.push('SHOPIFY_STORE');
+if (!TOKEN) missingEnvVars.push('SHOPIFY_ACCESS_TOKEN');
+
+if (missingEnvVars.length > 0) {
+  console.error('\n❌ MISSING REQUIRED ENVIRONMENT VARIABLES:');
+  missingEnvVars.forEach(v => console.error(`   - ${v}`));
+  console.error('\n📝 Create a .env file with:');
+  console.error('   SHOPIFY_STORE=your-store.myshopify.com');
+  console.error('   SHOPIFY_ACCESS_TOKEN=shpat_xxxxxxxxxxxxx');
+  console.error('   DATABASE_URL=postgresql://user:pass@localhost:5432/dbname\n');
+  
+  // Don't crash, but show error in UI
+}
+
+console.log('\n📋 Configuration:');
+console.log(`   Shopify Store: ${SHOP || '❌ NOT SET'}`);
+console.log(`   Shopify Token: ${TOKEN ? '✅ Set (hidden)' : '❌ NOT SET'}`);
+console.log(`   Database URL: ${DATABASE_URL ? '✅ Set' : '❌ NOT SET'}`);
+console.log(`   Port: ${PORT}\n`);
 
 // Track database status
 let dbConnected = false;
@@ -34,10 +59,9 @@ function createPool() {
       ssl: DATABASE_URL.includes('localhost') ? false : { rejectUnauthorized: false },
       max: 10,
       idleTimeoutMillis: 30000,
-      connectionTimeoutMillis: 5000 // Fail fast if can't connect
+      connectionTimeoutMillis: 5000
     });
 
-    // Add error handler to the pool
     newPool.on('error', (err) => {
       console.error("❌ Database pool error:", err.message);
       dbConnected = false;
@@ -50,11 +74,9 @@ function createPool() {
   }
 }
 
-// ================= RETRY CONNECTION WITH BACKOFF =================
 async function connectWithRetry() {
   if (!DATABASE_URL) {
     console.error("❌ Cannot connect: DATABASE_URL is missing");
-    console.error("   Please set DATABASE_URL environment variable");
     return false;
   }
 
@@ -62,52 +84,21 @@ async function connectWithRetry() {
   if (!pool) return false;
 
   try {
-    // Try to query the database
     await pool.query('SELECT NOW()');
     dbConnected = true;
     dbRetryCount = 0;
     console.log("✅ Database connected successfully");
-    
-    // Initialize tables
     await initDB();
     return true;
-    
   } catch (err) {
-    console.error(`❌ Database connection failed (attempt ${dbRetryCount + 1}/${MAX_DB_RETRIES}):`, err.message);
-    
-    if (err.message.includes('password authentication failed')) {
-      console.error("   🔑 PASSWORD AUTHENTICATION FAILED - Please check your DATABASE_URL credentials");
-      console.error("   Format should be: postgresql://username:password@host:port/database");
-      dbConnected = false;
-      return false;
-    }
-    
-    if (err.message.includes('does not exist')) {
-      console.error("   💾 DATABASE DOES NOT EXIST - Please create the database first");
-      dbConnected = false;
-      return false;
-    }
-    
+    console.error(`❌ Database connection failed:`, err.message);
     dbConnected = false;
-    
-    // Retry logic
-    if (dbRetryCount < MAX_DB_RETRIES) {
-      dbRetryCount++;
-      const delay = RETRY_DELAY_MS * Math.pow(2, dbRetryCount - 1);
-      console.log(`   Retrying in ${delay/1000} seconds...`);
-      await new Promise(resolve => setTimeout(resolve, delay));
-      return connectWithRetry();
-    } else {
-      console.error("❌ Max retries reached. App will run in DEGRADED MODE (database features unavailable)");
-      return false;
-    }
+    return false;
   }
 }
 
-// ================= INIT DB (only if connected) =================
 async function initDB() {
   if (!dbConnected || !pool) {
-    console.log("⏳ Database not connected - skipping table initialization");
     return false;
   }
   
@@ -136,33 +127,30 @@ async function initDB() {
   }
 }
 
-// ================= HEALTH CHECK ENDPOINT =================
-app.get("/health", async (req, res) => {
-  let dbStatus = 'unknown';
+// ================= HEALTH CHECK =================
+app.get("/health", (req, res) => {
+  const configStatus = {
+    shopify_store: SHOP ? 'configured' : 'missing',
+    shopify_token: TOKEN ? 'configured' : 'missing',
+    database_url: DATABASE_URL ? 'configured' : 'missing'
+  };
   
-  if (pool && dbConnected) {
-    try {
-      await pool.query('SELECT 1');
-      dbStatus = 'connected';
-    } catch (err) {
-      dbStatus = 'disconnected';
-      dbConnected = false;
-    }
-  } else {
-    dbStatus = 'disconnected';
-  }
+  const allConfigured = configStatus.shopify_store === 'configured' && 
+                        configStatus.shopify_token === 'configured';
   
-  res.status(dbStatus === 'connected' ? 200 : 503).json({
-    status: dbStatus === 'connected' ? 'healthy' : 'degraded',
-    database: dbStatus,
-    database_url_configured: !!DATABASE_URL,
+  res.status(allConfigured ? 200 : 503).json({
+    status: allConfigured ? 'ready' : 'misconfigured',
+    config: configStatus,
+    database: dbConnected ? 'connected' : 'disconnected',
     timestamp: new Date().toISOString(),
-    message: dbStatus !== 'connected' ? 'Database features unavailable. Check DATABASE_URL configuration.' : undefined
+    message: !allConfigured ? 'Missing Shopify configuration. Check .env file.' : undefined
   });
 });
 
 // ================= HOME =================
-app.get("/", async (req, res) => {
+app.get("/", (req, res) => {
+  const isConfigured = SHOP && TOKEN;
+  
   res.send(`
     <!DOCTYPE html>
     <html>
@@ -174,28 +162,44 @@ app.get("/", async (req, res) => {
         .card { background: #f4f4f4; padding: 20px; border-radius: 8px; margin: 20px 0; }
         .btn { display: inline-block; background: #007bff; color: white; padding: 10px 15px; 
                text-decoration: none; border-radius: 5px; margin: 5px; }
-        .btn:hover { background: #0056b3; }
+        .btn.disabled { background: #ccc; cursor: not-allowed; }
+        .error { background: #f8d7da; border-left: 4px solid #dc3545; padding: 15px; margin: 20px 0; }
         .warning { background: #fff3cd; border-left: 4px solid #ffc107; padding: 15px; margin: 20px 0; }
         h1 { color: #333; }
+        code { background: #eee; padding: 2px 5px; border-radius: 3px; }
       </style>
     </head>
     <body>
       <div class="container">
         <h1>📦 Picklist Management App</h1>
-        ${!dbConnected ? `
-          <div class="warning">
-            ⚠️ <strong>Database Disconnected</strong><br>
-            The app is running in degraded mode. Please check your DATABASE_URL environment variable.
-            <a href="/health">Check health status →</a>
+        
+        ${!isConfigured ? `
+          <div class="error">
+            <strong>❌ Configuration Error</strong><br><br>
+            Missing Shopify configuration. Please create a <code>.env</code> file with:<br><br>
+            <code>SHOPIFY_STORE=your-store.myshopify.com</code><br>
+            <code>SHOPIFY_ACCESS_TOKEN=shpat_xxxxxxxxxxxxx</code><br><br>
+            <strong>Current status:</strong><br>
+            • SHOPIFY_STORE: ${SHOP ? '✅ Set' : '❌ Missing'}<br>
+            • SHOPIFY_ACCESS_TOKEN: ${TOKEN ? '✅ Set' : '❌ Missing'}<br>
           </div>
         ` : ''}
+        
+        ${!dbConnected && DATABASE_URL ? `
+          <div class="warning">
+            ⚠️ Database disconnected - picklist saving unavailable
+          </div>
+        ` : ''}
+        
         <div class="card">
-          <a href="/orders" class="btn">📋 View Open Orders</a>
+          ${isConfigured ? 
+            '<a href="/orders" class="btn">📋 View Open Orders</a>' : 
+            '<span class="btn disabled">📋 View Open Orders (Configure Shopify first)</span>'
+          }
           <a href="/picklists" class="btn">📄 View Picklists</a>
           <a href="/health" class="btn">💚 Health Check</a>
         </div>
-        <p>Server is running on port ${PORT}</p>
-        <p>Database: ${dbConnected ? '✅ Connected' : '❌ Disconnected'}</p>
+        <p>Server running on port ${PORT}</p>
       </div>
     </body>
     </html>
@@ -204,26 +208,50 @@ app.get("/", async (req, res) => {
 
 // ================= FETCH ORDERS =================
 app.get("/orders", async (req, res) => {
+  // Check Shopify configuration
+  if (!SHOP || !TOKEN) {
+    return res.status(500).send(`
+      <h1>❌ Configuration Error</h1>
+      <p>Shopify credentials are not configured.</p>
+      <p>Please create a <code>.env</code> file with:</p>
+      <pre>
+SHOPIFY_STORE=your-store.myshopify.com
+SHOPIFY_ACCESS_TOKEN=shpat_xxxxxxxxxxxxx
+      </pre>
+      <a href="/">← Back to Home</a>
+    `);
+  }
+  
   try {
     const limit = req.query.limit || 20;
-    const response = await fetch(
-      `https://${SHOP}/admin/api/2024-01/orders.json?status=open&limit=${limit}`,
-      {
-        headers: {
-          "X-Shopify-Access-Token": TOKEN,
-          "Content-Type": "application/json"
-        }
+    const shopifyUrl = `https://${SHOP}/admin/api/2024-01/orders.json?status=open&limit=${limit}`;
+    
+    console.log(`📡 Fetching orders from: ${SHOP}`);
+    
+    const response = await fetch(shopifyUrl, {
+      headers: {
+        "X-Shopify-Access-Token": TOKEN,
+        "Content-Type": "application/json"
       }
-    );
+    });
 
     if (!response.ok) {
+      const errorText = await response.text();
+      console.error(`Shopify API error ${response.status}:`, errorText);
+      
+      if (response.status === 401) {
+        throw new Error("Invalid Shopify access token. Please check your SHOPIFY_ACCESS_TOKEN");
+      }
+      if (response.status === 404) {
+        throw new Error(`Store '${SHOP}' not found. Please check your SHOPIFY_STORE`);
+      }
       throw new Error(`Shopify API error: ${response.status}`);
     }
 
     const data = await response.json();
 
     let html = `
-      <h1>📋 Open Orders</h1>
+      <h1>📋 Open Orders from ${SHOP}</h1>
       <a href="/">← Back to Home</a>
       <br><br>
       <p>Showing ${data.orders?.length || 0} open orders</p>
@@ -256,20 +284,25 @@ app.get("/orders", async (req, res) => {
     res.status(500).send(`
       <h1>❌ Error</h1>
       <p>Failed to fetch orders: ${err.message}</p>
+      <hr>
+      <h3>Troubleshooting:</h3>
+      <ul>
+        <li>Check that your SHOPIFY_STORE is correct (format: your-store.myshopify.com)</li>
+        <li>Verify your SHOPIFY_ACCESS_TOKEN is valid</li>
+        <li>Make sure the API token has read_orders scope</li>
+      </ul>
       <a href="/">← Back to Home</a>
     `);
   }
 });
 
-// ================= CREATE PICKLIST (with DB check) =================
+// ================= CREATE PICKLIST =================
 app.get("/create-picklist/:orderId", async (req, res) => {
-  // Check database connection first
   if (!dbConnected || !pool) {
     return res.status(503).send(`
       <h1>⚠️ Database Unavailable</h1>
       <p>Cannot create picklist because the database is not connected.</p>
-      <p>Please check your DATABASE_URL environment variable and ensure PostgreSQL is running.</p>
-      <a href="/">← Back to Home</a>
+      <a href="/orders">← Back to Orders</a>
     `);
   }
   
@@ -293,10 +326,9 @@ app.get("/create-picklist/:orderId", async (req, res) => {
     const data = await response.json();
     const order = data.order;
 
-    const result = await pool.query(
+    await pool.query(
       `INSERT INTO picklists (order_id, order_number, data) 
-       VALUES ($1, $2, $3) 
-       RETURNING *`,
+       VALUES ($1, $2, $3)`,
       [orderId, order.order_number, order]
     );
 
@@ -323,13 +355,12 @@ app.get("/create-picklist/:orderId", async (req, res) => {
   }
 });
 
-// ================= VIEW PICKLISTS (with DB check) =================
+// ================= VIEW PICKLISTS =================
 app.get("/picklists", async (req, res) => {
   if (!dbConnected || !pool) {
     return res.status(503).send(`
       <h1>⚠️ Database Unavailable</h1>
       <p>Cannot retrieve picklists because the database is not connected.</p>
-      <p>Please check your DATABASE_URL environment variable and ensure PostgreSQL is running.</p>
       <a href="/">← Back to Home</a>
     `);
   }
@@ -382,38 +413,22 @@ app.get("/picklists", async (req, res) => {
   }
 });
 
-// ================= GRACEFUL SHUTDOWN =================
-process.on('SIGTERM', async () => {
-  console.log('🛑 Received SIGTERM, closing database pool...');
-  if (pool) await pool.end();
-  process.exit(0);
-});
-
-process.on('SIGINT', async () => {
-  console.log('🛑 Received SIGINT, closing database pool...');
-  if (pool) await pool.end();
-  process.exit(0);
-});
-
 // ================= START SERVER =================
 async function startServer() {
   console.log("🚀 Starting Picklist App...");
   
-  // Try to connect to database (non-blocking, won't crash app)
+  // Try to connect to database (doesn't block server)
   connectWithRetry().then(connected => {
     if (connected) {
       console.log("✅ App fully operational with database");
-    } else {
-      console.log("⚠️ App running in degraded mode without database");
-      console.log("   Set DATABASE_URL to enable picklist storage");
+    } else if (DATABASE_URL) {
+      console.log("⚠️ App running without database - picklist saving unavailable");
     }
   });
   
-  // Start HTTP server regardless of database status
   app.listen(PORT, '0.0.0.0', () => {
-    console.log(`🌍 Server running on port ${PORT}`);
-    console.log(`📍 Local URL: http://localhost:${PORT}`);
-    console.log(`📋 Health check: http://localhost:${PORT}/health`);
+    console.log(`\n🌍 Server running on http://localhost:${PORT}`);
+    console.log(`📋 Health check: http://localhost:${PORT}/health\n`);
   });
 }
 

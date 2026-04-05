@@ -9,41 +9,82 @@ const app = express();
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// Initialize Shopify App
-const shopify = shopifyApp({
-  api: {
-    apiKey: process.env.SHOPIFY_API_KEY,
-    apiSecretKey: process.env.SHOPIFY_API_SECRET,
-    scopes: process.env.SCOPES?.split(',') || ['read_orders', 'write_orders'],
-    hostName: process.env.HOST?.replace(/https:\/\//, '') || 'localhost:3000',
-    hostScheme: process.env.NODE_ENV === 'production' ? 'https' : 'http',
-    restResources,
-    isEmbeddedApp: true,
-  },
-  auth: {
-    path: '/auth',
-    callbackPath: '/auth/callback',
-  },
-  sessionStorage: new PostgreSQLSessionStorage(process.env.DATABASE_URL),
-  webhooks: {
-    path: '/webhooks',
-  },
-});
+// ================= ENVIRONMENT VALIDATION =================
+const REQUIRED_ENV_VARS = ['SHOPIFY_API_KEY', 'SHOPIFY_API_SECRET', 'DATABASE_URL', 'HOST'];
 
-// Mount Shopify middleware
-app.use(shopify.authMiddleware());
+const missingVars = REQUIRED_ENV_VARS.filter((key) => !process.env[key]);
+
+if (missingVars.length > 0) {
+  console.error('❌ Missing required environment variables:', missingVars.join(', '));
+  console.error('⚠️  Starting in degraded mode — Shopify features will be unavailable.');
+}
+
+const isConfigured = missingVars.length === 0;
+
+// Initialize Shopify App only when all required variables are present
+let shopify = null;
+
+if (isConfigured) {
+  try {
+    shopify = shopifyApp({
+      api: {
+        apiKey: process.env.SHOPIFY_API_KEY,
+        apiSecretKey: process.env.SHOPIFY_API_SECRET,
+        scopes: process.env.SCOPES?.split(',') || ['read_orders', 'write_orders'],
+        hostName: process.env.HOST?.replace(/https:\/\//, '') || 'localhost:3000',
+        hostScheme: process.env.NODE_ENV === 'production' ? 'https' : 'http',
+        restResources,
+        isEmbeddedApp: true,
+      },
+      auth: {
+        path: '/auth',
+        callbackPath: '/auth/callback',
+      },
+      sessionStorage: new PostgreSQLSessionStorage(process.env.DATABASE_URL),
+      webhooks: {
+        path: '/webhooks',
+      },
+    });
+
+    // Mount Shopify middleware only when Shopify is configured
+    app.use(shopify.authMiddleware());
+
+    console.log('✅ Shopify API initialized successfully');
+  } catch (err) {
+    console.error('❌ Failed to initialize Shopify API:', err.message);
+    shopify = null;
+  }
+}
 
 // ================= HEALTH CHECK =================
 app.get('/health', (req, res) => {
-  res.json({
-    status: 'ok',
+  const configStatus = REQUIRED_ENV_VARS.reduce((acc, key) => {
+    acc[key] = process.env[key] ? 'set' : 'missing';
+    return acc;
+  }, {});
+
+  const status = isConfigured && shopify !== null ? 'ok' : 'degraded';
+
+  res.status(status === 'ok' ? 200 : 503).json({
+    status,
     timestamp: new Date().toISOString(),
-    environment: process.env.NODE_ENV || 'development'
+    environment: process.env.NODE_ENV || 'development',
+    shopifyConfigured: shopify !== null,
+    configuration: configStatus,
+    ...(missingVars.length > 0 && { missingVariables: missingVars }),
   });
 });
 
 // ================= ROOT ROUTE (App Entry Point) =================
 app.get('/', async (req, res) => {
+  const degradedBanner = !shopify
+    ? `<div class="warning">
+        <strong>⚠️ Configuration Incomplete</strong>
+        <p>The following required environment variables are missing: <code>${missingVars.join(', ')}</code></p>
+        <p>Shopify features are unavailable until these are set. Visit <a href="/health">/health</a> for full configuration status.</p>
+      </div>`
+    : '';
+
   res.send(`
     <!DOCTYPE html>
     <html>
@@ -126,6 +167,24 @@ app.get('/', async (req, res) => {
           border-radius: 8px;
           margin: 15px 0;
         }
+        .warning {
+          background: #fff3cd;
+          color: #856404;
+          border: 1px solid #ffc107;
+          padding: 15px 20px;
+          border-radius: 8px;
+          margin-bottom: 20px;
+        }
+        .warning code {
+          background: rgba(0,0,0,0.08);
+          padding: 2px 6px;
+          border-radius: 3px;
+          font-size: 0.9em;
+        }
+        .warning a {
+          color: #856404;
+          font-weight: 600;
+        }
         table {
           width: 100%;
           border-collapse: collapse;
@@ -143,6 +202,7 @@ app.get('/', async (req, res) => {
     </head>
     <body>
       <div class="container">
+        ${degradedBanner}
         <div class="header">
           <h1>📦 Picklist Management App</h1>
           <p>Manage and generate picklists for your Shopify orders</p>
@@ -260,8 +320,19 @@ app.get('/', async (req, res) => {
 
 // ================= API ROUTES (Protected by Shopify Auth) =================
 
+// Middleware that rejects API requests when Shopify is not configured
+function requireShopify(req, res, next) {
+  if (!shopify) {
+    return res.status(503).json({
+      error: 'Shopify is not configured. The following environment variables are missing: ' + missingVars.join(', '),
+      missingVariables: missingVars,
+    });
+  }
+  next();
+}
+
 // Get open orders
-app.get('/api/orders', shopify.authenticate.admin, async (req, res) => {
+app.get('/api/orders', requireShopify, shopify?.authenticate.admin ?? ((req, res, next) => next()), async (req, res) => {
   try {
     const session = res.locals.shopify.session;
     const client = new shopify.api.clients.Rest({ session });
@@ -279,7 +350,7 @@ app.get('/api/orders', shopify.authenticate.admin, async (req, res) => {
 });
 
 // Create picklist
-app.post('/api/create-picklist', shopify.authenticate.admin, async (req, res) => {
+app.post('/api/create-picklist', requireShopify, shopify?.authenticate.admin ?? ((req, res, next) => next()), async (req, res) => {
   try {
     const session = res.locals.shopify.session;
     const { orderId } = req.body;
@@ -313,7 +384,7 @@ app.post('/api/create-picklist', shopify.authenticate.admin, async (req, res) =>
 });
 
 // Get all picklists
-app.get('/api/picklists', shopify.authenticate.admin, async (req, res) => {
+app.get('/api/picklists', requireShopify, shopify?.authenticate.admin ?? ((req, res, next) => next()), async (req, res) => {
   try {
     const session = res.locals.shopify.session;
     
@@ -333,6 +404,11 @@ app.get('/api/picklists', shopify.authenticate.admin, async (req, res) => {
 
 // ================= INITIALIZE DATABASE TABLES =================
 async function initDatabase() {
+  if (!shopify) {
+    console.warn('⚠️  Skipping database initialization — Shopify is not configured.');
+    return;
+  }
+
   try {
     // Create picklists table if it doesn't exist
     await shopify.sessionStorage.db.query(`

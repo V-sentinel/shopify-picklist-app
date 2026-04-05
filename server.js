@@ -1,5 +1,5 @@
 import express from 'express';
-import { shopifyApp } from '@shopify/shopify-app-express';
+import { shopifyApi, ApiVersion, Session } from '@shopify/shopify-api';
 import { PostgreSQLSessionStorage } from '@shopify/shopify-app-session-storage-postgresql';
 import { restResources } from '@shopify/shopify-api/rest/admin/2024-01';
 
@@ -9,29 +9,20 @@ const app = express();
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// Initialize Shopify App
-const shopify = shopifyApp({
-  api: {
-    apiKey: process.env.SHOPIFY_API_KEY,
-    apiSecretKey: process.env.SHOPIFY_API_SECRET,
-    scopes: process.env.SCOPES?.split(',') || ['read_orders', 'write_orders'],
-    hostName: process.env.HOST?.replace(/https:\/\//, '') || 'localhost:3000',
-    hostScheme: process.env.NODE_ENV === 'production' ? 'https' : 'http',
-    restResources,
-    isEmbeddedApp: true,
-  },
-  auth: {
-    path: '/auth',
-    callbackPath: '/auth/callback',
-  },
-  sessionStorage: new PostgreSQLSessionStorage(process.env.DATABASE_URL),
-  webhooks: {
-    path: '/webhooks',
-  },
+// Initialize Shopify API
+const shopify = shopifyApi({
+  apiKey: process.env.SHOPIFY_API_KEY,
+  apiSecretKey: process.env.SHOPIFY_API_SECRET,
+  scopes: process.env.SCOPES?.split(',') || ['read_orders', 'write_orders'],
+  hostName: process.env.HOST?.replace(/https:\/\//, '') || 'localhost:3000',
+  hostScheme: process.env.NODE_ENV === 'production' ? 'https' : 'http',
+  apiVersion: ApiVersion.January24,
+  isEmbeddedApp: true,
+  restResources,
 });
 
-// Mount Shopify middleware
-app.use(shopify.authMiddleware());
+// Session storage
+const sessionStorage = new PostgreSQLSessionStorage(process.env.DATABASE_URL);
 
 // ================= HEALTH CHECK =================
 app.get('/health', (req, res) => {
@@ -42,8 +33,112 @@ app.get('/health', (req, res) => {
   });
 });
 
-// ================= ROOT ROUTE (App Entry Point) =================
-app.get('/', async (req, res) => {
+// ================= OAuth Routes =================
+app.get('/auth', async (req, res) => {
+  const shop = req.query.shop;
+  
+  if (!shop) {
+    return res.status(400).send('Missing shop parameter');
+  }
+  
+  const authRoute = await shopify.auth.begin({
+    shop,
+    callbackPath: '/auth/callback',
+    isOnline: false,
+    rawRequest: req,
+    rawResponse: res,
+  });
+  
+  res.redirect(authRoute);
+});
+
+app.get('/auth/callback', async (req, res) => {
+  try {
+    const callbackResponse = await shopify.auth.callback({
+      rawRequest: req,
+      rawResponse: res,
+    });
+    
+    const { session } = callbackResponse;
+    
+    // Store session in database
+    await sessionStorage.storeSession(session);
+    
+    // Redirect to app
+    res.redirect(`/?shop=${session.shop}`);
+  } catch (error) {
+    console.error('Auth callback error:', error);
+    res.status(500).send('Authentication failed');
+  }
+});
+
+// ================= Middleware to check auth =================
+async function authenticateShop(req, res, next) {
+  const shop = req.query.shop || req.body.shop;
+  
+  if (!shop) {
+    return res.status(401).json({ error: 'Shop parameter required' });
+  }
+  
+  try {
+    const session = await sessionStorage.loadSession(`${shop}_${process.env.SHOPIFY_API_KEY}`);
+    
+    if (!session || session.isExpired()) {
+      return res.status(401).json({ 
+        error: 'Not authenticated',
+        authUrl: `/auth?shop=${shop}`
+      });
+    }
+    
+    req.shopifySession = session;
+    next();
+  } catch (error) {
+    console.error('Auth error:', error);
+    res.status(500).json({ error: 'Authentication failed' });
+  }
+}
+
+// ================= ROOT ROUTE =================
+app.get('/', (req, res) => {
+  const shop = req.query.shop;
+  
+  if (!shop) {
+    res.send(`
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <title>Picklist App</title>
+        <style>
+          body { font-family: Arial, sans-serif; margin: 40px; text-align: center; }
+          .container { max-width: 500px; margin: 0 auto; padding: 40px; border-radius: 8px; background: #f4f6f8; }
+          input { padding: 10px; width: 70%; margin-right: 10px; }
+          button { padding: 10px 20px; background: #008060; color: white; border: none; border-radius: 4px; cursor: pointer; }
+        </style>
+      </head>
+      <body>
+        <div class="container">
+          <h1>📦 Picklist App</h1>
+          <p>Enter your Shopify store URL to get started</p>
+          <form onsubmit="installApp(event)">
+            <input type="text" id="shop" placeholder="your-store.myshopify.com" />
+            <button type="submit">Install App</button>
+          </form>
+        </div>
+        <script>
+          function installApp(e) {
+            e.preventDefault();
+            const shop = document.getElementById('shop').value.trim();
+            if (shop) {
+              window.location.href = \`/auth?shop=\${shop}\`;
+            }
+          }
+        </script>
+      </body>
+      </html>
+    `);
+    return;
+  }
+  
   res.send(`
     <!DOCTYPE html>
     <html>
@@ -84,15 +179,11 @@ app.get('/', async (req, res) => {
           border-radius: 4px;
           margin: 5px;
           font-weight: 500;
+          border: none;
+          cursor: pointer;
         }
         .btn-secondary {
           background: #6b6b6b;
-        }
-        .btn:hover {
-          opacity: 0.9;
-        }
-        .orders-list {
-          margin-top: 20px;
         }
         .order-card {
           border: 1px solid #e1e1e1;
@@ -105,12 +196,6 @@ app.get('/', async (req, res) => {
           font-size: 18px;
           font-weight: bold;
           color: #008060;
-        }
-        .picklist-items {
-          background: #f9f9f9;
-          padding: 15px;
-          border-radius: 8px;
-          margin: 15px 0;
         }
         .success {
           background: #d4edda;
@@ -126,26 +211,13 @@ app.get('/', async (req, res) => {
           border-radius: 8px;
           margin: 15px 0;
         }
-        table {
-          width: 100%;
-          border-collapse: collapse;
-        }
-        th, td {
-          text-align: left;
-          padding: 12px;
-          border-bottom: 1px solid #e1e1e1;
-        }
-        th {
-          background: #f4f6f8;
-          font-weight: 600;
-        }
       </style>
     </head>
     <body>
       <div class="container">
         <div class="header">
           <h1>📦 Picklist Management App</h1>
-          <p>Manage and generate picklists for your Shopify orders</p>
+          <p>Store: <strong>${shop}</strong></p>
         </div>
         <div class="content">
           <div style="margin-bottom: 20px;">
@@ -159,30 +231,33 @@ app.get('/', async (req, res) => {
       </div>
 
       <script>
+        const shop = '${shop}';
+        
         async function loadOrders() {
           document.getElementById('app-content').innerHTML = '<p>Loading orders...</p>';
           try {
-            const response = await fetch('/api/orders');
-            const orders = await response.json();
+            const response = await fetch(\`/api/orders?shop=\${shop}\`);
+            const data = await response.json();
             
-            if (!response.ok) throw new Error(orders.error || 'Failed to load orders');
+            if (!response.ok) throw new Error(data.error || 'Failed to load orders');
+            
+            if (data.orders.length === 0) {
+              document.getElementById('app-content').innerHTML = '<p>No open orders found.</p>';
+              return;
+            }
             
             let html = '<h2>📋 Open Orders</h2>';
-            if (orders.length === 0) {
-              html += '<p>No open orders found.</p>';
-            } else {
-              orders.forEach(order => {
-                html += \`
-                  <div class="order-card">
-                    <div class="order-number">Order #\${order.order_number}</div>
-                    <div>Customer: \${order.customer?.first_name || ''} \${order.customer?.last_name || ''}</div>
-                    <div>Items: \${order.line_items?.length || 0}</div>
-                    <div>Total: $\${order.total_price}</div>
-                    <button onclick="createPicklist('\${order.id}')" class="btn" style="margin-top:10px;">✅ Create Picklist</button>
-                  </div>
-                \`;
-              });
-            }
+            data.orders.forEach(order => {
+              html += \`
+                <div class="order-card">
+                  <div class="order-number">Order #\${order.order_number}</div>
+                  <div>Customer: \${order.customer?.first_name || ''} \${order.customer?.last_name || ''}</div>
+                  <div>Items: \${order.line_items?.length || 0}</div>
+                  <div>Total: $\${order.total_price}</div>
+                  <button onclick="createPicklist('\${order.id}')" class="btn" style="margin-top:10px;">✅ Create Picklist</button>
+                </div>
+              \`;
+            });
             document.getElementById('app-content').innerHTML = html;
           } catch (error) {
             document.getElementById('app-content').innerHTML = '<div class="error">❌ Error: ' + error.message + '</div>';
@@ -192,7 +267,7 @@ app.get('/', async (req, res) => {
         async function loadPicklists() {
           document.getElementById('app-content').innerHTML = '<p>Loading picklists...</p>';
           try {
-            const response = await fetch('/api/picklists');
+            const response = await fetch(\`/api/picklists?shop=\${shop}\`);
             const picklists = await response.json();
             
             if (!response.ok) throw new Error(picklists.error || 'Failed to load picklists');
@@ -211,7 +286,7 @@ app.get('/', async (req, res) => {
                 <div class="order-card">
                   <div class="order-number">Order #\${order.order_number}</div>
                   <div style="color:#666; font-size:12px;">Created: \${createdDate}</div>
-                  <div class="picklist-items">
+                  <div style="margin-top:10px; padding-left:20px;">
                     <strong>Items to pick:</strong>
                     <ul>
                       \${order.line_items?.map(item => '<li>' + item.title + ' - Qty: ' + item.quantity + '</li>').join('') || '<li>No items</li>'}
@@ -231,7 +306,7 @@ app.get('/', async (req, res) => {
             const response = await fetch('/api/create-picklist', {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ orderId })
+              body: JSON.stringify({ orderId, shop })
             });
             const result = await response.json();
             
@@ -258,20 +333,20 @@ app.get('/', async (req, res) => {
   `);
 });
 
-// ================= API ROUTES (Protected by Shopify Auth) =================
+// ================= API ROUTES =================
 
 // Get open orders
-app.get('/api/orders', shopify.authenticate.admin, async (req, res) => {
+app.get('/api/orders', authenticateShop, async (req, res) => {
   try {
-    const session = res.locals.shopify.session;
-    const client = new shopify.api.clients.Rest({ session });
+    const { session } = req.shopifySession;
+    const client = new shopify.clients.Rest({ session });
     
     const response = await client.get({
       path: 'orders',
       query: { status: 'open', limit: 50 }
     });
     
-    res.json(response.body.orders || []);
+    res.json({ orders: response.body.orders || [] });
   } catch (error) {
     console.error('Error fetching orders:', error);
     res.status(500).json({ error: error.message });
@@ -279,14 +354,13 @@ app.get('/api/orders', shopify.authenticate.admin, async (req, res) => {
 });
 
 // Create picklist
-app.post('/api/create-picklist', shopify.authenticate.admin, async (req, res) => {
+app.post('/api/create-picklist', authenticateShop, async (req, res) => {
   try {
-    const session = res.locals.shopify.session;
+    const { session } = req.shopifySession;
     const { orderId } = req.body;
     
-    const client = new shopify.api.clients.Rest({ session });
+    const client = new shopify.clients.Rest({ session });
     
-    // Fetch the order details
     const response = await client.get({
       path: `orders/${orderId}`
     });
@@ -294,17 +368,23 @@ app.post('/api/create-picklist', shopify.authenticate.admin, async (req, res) =>
     const order = response.body.order;
     
     // Store picklist in database
-    const dbResult = await shopify.sessionStorage.db.query(
-      `INSERT INTO picklists (shop, order_id, order_number, order_data, created_at)
-       VALUES ($1, $2, $3, $4, NOW())
-       RETURNING id`,
-      [session.shop, orderId, order.order_number, JSON.stringify(order)]
-    );
+    const query = `
+      INSERT INTO picklists (shop, order_id, order_number, order_data, created_at)
+      VALUES ($1, $2, $3, $4, NOW())
+      RETURNING id
+    `;
+    
+    const result = await sessionStorage.db.query(query, [
+      session.shop, 
+      orderId, 
+      order.order_number, 
+      JSON.stringify(order)
+    ]);
     
     res.json({ 
       success: true, 
       message: `Picklist created for Order #${order.order_number}`,
-      picklistId: dbResult.rows[0].id
+      picklistId: result.rows[0].id
     });
   } catch (error) {
     console.error('Error creating picklist:', error);
@@ -313,11 +393,11 @@ app.post('/api/create-picklist', shopify.authenticate.admin, async (req, res) =>
 });
 
 // Get all picklists
-app.get('/api/picklists', shopify.authenticate.admin, async (req, res) => {
+app.get('/api/picklists', authenticateShop, async (req, res) => {
   try {
-    const session = res.locals.shopify.session;
+    const { session } = req.shopifySession;
     
-    const result = await shopify.sessionStorage.db.query(
+    const result = await sessionStorage.db.query(
       `SELECT * FROM picklists 
        WHERE shop = $1 
        ORDER BY created_at DESC`,
@@ -335,7 +415,7 @@ app.get('/api/picklists', shopify.authenticate.admin, async (req, res) => {
 async function initDatabase() {
   try {
     // Create picklists table if it doesn't exist
-    await shopify.sessionStorage.db.query(`
+    await sessionStorage.db.query(`
       CREATE TABLE IF NOT EXISTS picklists (
         id SERIAL PRIMARY KEY,
         shop VARCHAR(255) NOT NULL,
@@ -347,7 +427,7 @@ async function initDatabase() {
     `);
     
     // Create index for faster queries
-    await shopify.sessionStorage.db.query(`
+    await sessionStorage.db.query(`
       CREATE INDEX IF NOT EXISTS idx_picklists_shop_created 
       ON picklists(shop, created_at DESC)
     `);
@@ -363,9 +443,9 @@ const PORT = process.env.PORT || 3000;
 
 app.listen(PORT, async () => {
   console.log(`🚀 Server running on port ${PORT}`);
-  console.log(`📋 Health check: http://localhost:${PORT}/health`);
-  console.log(`🔐 OAuth path: /auth?shop=your-shop.myshopify.com`);
+  console.log(`📍 Health check: http://localhost:${PORT}/health`);
+  console.log(`🔐 Install app: http://localhost:${PORT}/auth?shop=your-shop.myshopify.com`);
   
-  // Initialize database after Shopify is ready
+  // Initialize database after server starts
   setTimeout(initDatabase, 2000);
 });

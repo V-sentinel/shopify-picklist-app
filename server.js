@@ -1,6 +1,3 @@
-// Load environment variables FIRST - before anything else
-require('dotenv').config();
-
 const express = require("express");
 const { Pool } = require("pg");
 const fetch = require("node-fetch");

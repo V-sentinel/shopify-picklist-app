@@ -20,17 +20,42 @@ const pool = new Pool({
 });
 
 // ================= INIT DB =================
-async function initDB() {
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS picklists (
-      id SERIAL PRIMARY KEY,
-      data JSONB,
-      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    );
-  `);
-  console.log("✅ Picklist table ready");
+const MAX_RETRIES = 5;
+const RETRY_BASE_DELAY_MS = 1000;
+
+async function initDB(attempt = 1) {
+  try {
+    console.log(`🔄 DB connection attempt ${attempt} of ${MAX_RETRIES}...`);
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS picklists (
+        id SERIAL PRIMARY KEY,
+        data JSONB,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      );
+    `);
+    console.log("✅ Picklist table ready");
+  } catch (err) {
+    console.error(`❌ DB connection attempt ${attempt} failed: ${err.message}`);
+    if (attempt < MAX_RETRIES) {
+      const delay = RETRY_BASE_DELAY_MS * Math.pow(2, attempt - 1);
+      console.log(`⏳ Retrying in ${delay}ms...`);
+      await new Promise(resolve => setTimeout(resolve, delay));
+      return initDB(attempt + 1);
+    }
+    console.error("🚨 All DB connection attempts failed. The app will continue running but database operations will fail until the connection is restored.");
+  }
 }
-initDB();
+
+// ================= HEALTH CHECK =================
+app.get("/health", async (req, res) => {
+  try {
+    await pool.query("SELECT 1");
+    res.status(200).json({ status: "ok", db: "connected" });
+  } catch (err) {
+    console.error("Health check DB error:", err.message);
+    res.status(503).json({ status: "degraded", db: "unavailable", error: err.message });
+  }
+});
 
 // ================= HOME =================
 app.get("/", async (req, res) => {
@@ -111,31 +136,37 @@ app.get("/create-picklist/:orderId", async (req, res) => {
 
 // ================= VIEW PICKLISTS =================
 app.get("/picklists", async (req, res) => {
-  const result = await pool.query(
-    "SELECT * FROM picklists ORDER BY id DESC"
-  );
+  try {
+    const result = await pool.query(
+      "SELECT * FROM picklists ORDER BY id DESC"
+    );
 
-  let html = "<h1>Picklists</h1><a href='/'>Back</a><br><br>";
+    let html = "<h1>Picklists</h1><a href='/'>Back</a><br><br>";
 
-  result.rows.forEach(row => {
-    const order = row.data;
+    result.rows.forEach(row => {
+      const order = row.data;
 
-    html += `
-      <div style="border:1px solid black; margin:10px; padding:10px;">
-        <b>Order #${order.order_number}</b><br>
-        ${order.line_items.map(item => `
-          <div>
-            ${item.title} - Qty: ${item.quantity}
-          </div>
-        `).join("")}
-      </div>
-    `;
-  });
+      html += `
+        <div style="border:1px solid black; margin:10px; padding:10px;">
+          <b>Order #${order.order_number}</b><br>
+          ${order.line_items.map(item => `
+            <div>
+              ${item.title} - Qty: ${item.quantity}
+            </div>
+          `).join("")}
+        </div>
+      `;
+    });
 
-  res.send(html);
+    res.send(html);
+  } catch (err) {
+    console.error("Error fetching picklists:", err.message);
+    res.status(503).send("❌ Database unavailable — unable to load picklists. Please try again later.");
+  }
 });
 
 // ================= START =================
 app.listen(PORT, () => {
   console.log("🚀 Picklist app running on port " + PORT);
+  initDB();
 });

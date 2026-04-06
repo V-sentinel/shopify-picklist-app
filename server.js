@@ -9,14 +9,24 @@ const SHOP = process.env.SHOPIFY_STORE;
 const CLIENT_ID = process.env.SHOPIFY_CLIENT_ID;
 const CLIENT_SECRET = process.env.SHOPIFY_CLIENT_SECRET;
 
+// ================= CACHE =================
+let cachedToken = null;
+let tokenExpiry = 0;
+
 // ================= GET ACCESS TOKEN =================
 async function getAccessToken() {
+  // Return cached token if it's still valid (with a 1-minute safety buffer)
+  if (cachedToken && Date.now() < tokenExpiry - 60000) {
+    return cachedToken;
+  }
+
+  // Shopify expects x-www-form-urlencoded for this endpoint
   const response = await fetch(`https://${SHOP}/admin/oauth/access_token`, {
     method: "POST",
     headers: {
-      "Content-Type": "application/json"
+      "Content-Type": "application/x-www-form-urlencoded"
     },
-    body: JSON.stringify({
+    body: new URLSearchParams({
       grant_type: "client_credentials",
       client_id: CLIENT_ID,
       client_secret: CLIENT_SECRET
@@ -29,7 +39,11 @@ async function getAccessToken() {
     throw new Error(JSON.stringify(data));
   }
 
-  return data.access_token;
+  // Cache the token and set the expiry timestamp
+  cachedToken = data.access_token;
+  tokenExpiry = Date.now() + (data.expires_in * 1000);
+
+  return cachedToken;
 }
 
 // ================= VALIDATION =================
@@ -49,52 +63,53 @@ SHOPIFY_CLIENT_SECRET=xxxx
 
 } else {
 
-// ================= HOME =================
-app.get("/", (req, res) => {
-  res.send(`
-    <h1>📦 Picklist App (NEW AUTH)</h1>
-    <a href="/orders">View Orders</a>
-  `);
-});
+  // ================= HOME =================
+  app.get("/", (req, res) => {
+    res.send(`
+      <h1>📦 Picklist App</h1>
+      <a href="/orders">View Orders</a>
+    `);
+  });
 
-// ================= FETCH ORDERS =================
-app.get("/orders", async (req, res) => {
-  try {
-    const token = await getAccessToken();
+  // ================= FETCH ORDERS =================
+  app.get("/orders", async (req, res) => {
+    try {
+      const token = await getAccessToken();
 
-    const response = await fetch(
-      `https://${SHOP}/admin/api/2024-04/orders.json?status=unfulfilled&limit=20`,
-      {
-        headers: {
-          "X-Shopify-Access-Token": token,
-          "Content-Type": "application/json"
+      // Updated API version to 2026-01
+      const response = await fetch(
+        `https://${SHOP}/admin/api/2026-01/orders.json?status=unfulfilled&limit=20`,
+        {
+          headers: {
+            "X-Shopify-Access-Token": token,
+            "Content-Type": "application/json"
+          }
         }
+      );
+
+      const data = await response.json();
+
+      if (data.errors) {
+        return res.send(`<pre>${JSON.stringify(data.errors)}</pre>`);
       }
-    );
 
-    const data = await response.json();
+      let html = "<h1>Orders</h1><a href='/'>Back</a><br><br>";
 
-    if (data.errors) {
-      return res.send(`<pre>${JSON.stringify(data.errors)}</pre>`);
+      data.orders.forEach(order => {
+        html += `
+          <div style="border:1px solid #ccc; padding:10px; margin:10px;">
+            <b>Order #${order.order_number}</b><br>
+            Items: ${order.line_items.length}
+          </div>
+        `;
+      });
+
+      res.send(html);
+
+    } catch (err) {
+      res.send(`<pre>${err.message}</pre>`);
     }
-
-    let html = "<h1>Orders</h1><a href='/'>Back</a><br><br>";
-
-    data.orders.forEach(order => {
-      html += `
-        <div style="border:1px solid #ccc; padding:10px; margin:10px;">
-          <b>Order #${order.order_number}</b><br>
-          Items: ${order.line_items.length}
-        </div>
-      `;
-    });
-
-    res.send(html);
-
-  } catch (err) {
-    res.send(`<pre>${err.message}</pre>`);
-  }
-});
+  });
 
 }
 

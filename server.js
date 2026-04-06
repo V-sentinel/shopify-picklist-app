@@ -6,28 +6,53 @@ const PORT = process.env.PORT || 3000;
 
 // ================= ENV =================
 const SHOP = process.env.SHOPIFY_STORE;
-const TOKEN = process.env.SHOPIFY_ACCESS_TOKEN;
+const CLIENT_ID = process.env.SHOPIFY_CLIENT_ID;
+const CLIENT_SECRET = process.env.SHOPIFY_CLIENT_SECRET;
+
+// ================= GET ACCESS TOKEN =================
+async function getAccessToken() {
+  const response = await fetch(`https://${SHOP}/admin/oauth/access_token`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      grant_type: "client_credentials",
+      client_id: CLIENT_ID,
+      client_secret: CLIENT_SECRET
+    })
+  });
+
+  const data = await response.json();
+
+  if (data.error) {
+    throw new Error(JSON.stringify(data));
+  }
+
+  return data.access_token;
+}
 
 // ================= VALIDATION =================
-if (!SHOP || !TOKEN) {
-  console.error("❌ Missing SHOPIFY_STORE or SHOPIFY_ACCESS_TOKEN");
+if (!SHOP || !CLIENT_ID || !CLIENT_SECRET) {
+  console.error("❌ Missing ENV variables");
 
   app.get("/", (req, res) => {
     res.send(`
       <h2 style="color:red;">Configuration Error</h2>
-      <p>Missing Shopify variables</p>
       <pre>
 SHOPIFY_STORE=your-store.myshopify.com
-SHOPIFY_ACCESS_TOKEN=shpat_xxxxxx
+SHOPIFY_CLIENT_ID=xxxx
+SHOPIFY_CLIENT_SECRET=xxxx
       </pre>
     `);
   });
+
 } else {
 
 // ================= HOME =================
 app.get("/", (req, res) => {
   res.send(`
-    <h1>📦 Picklist App</h1>
+    <h1>📦 Picklist App (NEW AUTH)</h1>
     <a href="/orders">View Orders</a>
   `);
 });
@@ -35,11 +60,13 @@ app.get("/", (req, res) => {
 // ================= FETCH ORDERS =================
 app.get("/orders", async (req, res) => {
   try {
+    const token = await getAccessToken();
+
     const response = await fetch(
       `https://${SHOP}/admin/api/2024-04/orders.json?status=unfulfilled&limit=20`,
       {
         headers: {
-          "X-Shopify-Access-Token": TOKEN,
+          "X-Shopify-Access-Token": token,
           "Content-Type": "application/json"
         }
       }
@@ -48,10 +75,7 @@ app.get("/orders", async (req, res) => {
     const data = await response.json();
 
     if (data.errors) {
-      return res.send(`
-        <h2 style="color:red;">Shopify Error</h2>
-        <pre>${JSON.stringify(data.errors)}</pre>
-      `);
+      return res.send(`<pre>${JSON.stringify(data.errors)}</pre>`);
     }
 
     let html = "<h1>Orders</h1><a href='/'>Back</a><br><br>";
@@ -68,10 +92,7 @@ app.get("/orders", async (req, res) => {
     res.send(html);
 
   } catch (err) {
-    res.send(`
-      <h2 style="color:red;">Error</h2>
-      <pre>${err.message}</pre>
-    `);
+    res.send(`<pre>${err.message}</pre>`);
   }
 });
 

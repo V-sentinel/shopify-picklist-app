@@ -9,40 +9,49 @@ const PORT = process.env.PORT || 3000;
 const SHOP = (process.env.SHOP_NAME || "").trim();
 const CLIENT_ID = (process.env.SHOPIFY_CLIENT_ID || "").trim();
 const CLIENT_SECRET = (process.env.SHOPIFY_CLIENT_SECRET || "").trim();
-const DATABASE_URL = process.env.DATABASE_URL;
+const DATABASE_URL = process.env.DATABASE_URL || process.env.DATABASE_PRIVATE_URL;
 
-const pool = new Pool({
+console.log("🚀 Starting Picklist App...");
+console.log("SHOP_NAME:", SHOP ? "✅" : "❌");
+console.log("CLIENT_ID:", CLIENT_ID ? "✅" : "❌");
+console.log("CLIENT_SECRET:", CLIENT_SECRET ? "✅" : "❌");
+console.log("DATABASE_URL:", DATABASE_URL ? "✅" : "❌");
+
+if (!SHOP || !CLIENT_ID || !CLIENT_SECRET) {
+  console.error("❌ Missing Shopify credentials in Render Environment Variables");
+}
+
+// ================= DATABASE =================
+const pool = DATABASE_URL ? new Pool({
   connectionString: DATABASE_URL,
-  ssl: { rejectUnauthorized: false }
-});
+  ssl: { rejectUnauthorized: false },
+}) : null;
 
-// ================= DATABASE INIT =================
-// Added the missing columns "order_number" and "items_json" found in your error logs
 async function initDB() {
+  if (!pool) return console.warn("⚠️ Database disabled");
   try {
     await pool.query(`
       CREATE TABLE IF NOT EXISTS picklists (
         id SERIAL PRIMARY KEY,
         order_name TEXT UNIQUE,
-        order_number TEXT,
         order_data JSONB,
-        items_json JSONB,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       );
     `);
-    console.log("✅ Database Ready");
+    console.log("✅ Database ready");
   } catch (err) {
     console.error("❌ DB Error:", err.message);
   }
 }
 initDB();
 
-// ================= TOKEN HELPERS =================
+// ================= TOKEN =================
 let cachedToken = null;
 let tokenExpiry = 0;
 
 async function getAccessToken() {
   if (cachedToken && Date.now() < tokenExpiry) return cachedToken;
+
   const response = await fetch(`https://${SHOP}.myshopify.com/admin/oauth/access_token`, {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
@@ -52,51 +61,67 @@ async function getAccessToken() {
       client_secret: CLIENT_SECRET,
     }),
   });
+
   const data = await response.json();
+  if (!data.access_token) throw new Error("Token failed");
+
   cachedToken = data.access_token;
   tokenExpiry = Date.now() + 3400000;
   return cachedToken;
 }
 
-// ================= ROUTES =================
-
+// ================= BULK ACTION (This creates the menu option) =================
 app.get("/bulk-action", async (req, res) => {
   const ids = req.query.ids ? req.query.ids.split(",") : [];
-  const cleanIds = ids.map(id => id.split("/").pop());
+  if (ids.length === 0) return res.redirect("/view-picklists");
 
   try {
     const token = await getAccessToken();
     const response = await fetch(
-      `https://${SHOP}.myshopify.com/admin/api/2024-10/orders.json?ids=${cleanIds.join(",")}`,
+      `https://${SHOP}.myshopify.com/admin/api/2025-01/orders.json?ids=${ids.join(",")}`,
       { headers: { "X-Shopify-Access-Token": token } }
     );
     const data = await response.json();
 
     for (const order of (data.orders || [])) {
-      await pool.query(
-        `INSERT INTO picklists (order_name, order_number, order_data, items_json) 
-         VALUES ($1, $2, $3, $4) ON CONFLICT (order_name) DO NOTHING`,
-        [order.name, order.order_number.toString(), JSON.stringify(order), JSON.stringify(order.line_items)]
-      );
+      if (pool) {
+        await pool.query(
+          `INSERT INTO picklists (order_name, order_data) 
+           VALUES ($1, $2) ON CONFLICT (order_name) DO NOTHING`,
+          [order.name, JSON.stringify(order)]
+        );
+      }
     }
     res.redirect("/view-picklists");
   } catch (err) {
-    res.status(500).send("Sync Error: " + err.message);
+    console.error(err);
+    res.status(500).send("Error: " + err.message);
   }
 });
 
+// View Picklists
 app.get("/view-picklists", async (req, res) => {
-  const result = await pool.query("SELECT * FROM picklists ORDER BY created_at DESC");
-  let html = `<h1>Saved Picklists</h1><a href="/">Back</a><hr>`;
-  result.rows.forEach(r => {
-    html += `<div style="border:1px solid #000; margin:10px; padding:10px;">
-              <h3>Order ${r.order_name}</h3>
-              <pre>${JSON.stringify(r.items_json, null, 2)}</pre>
-             </div>`;
-  });
-  res.send(html);
+  try {
+    if (!pool) return res.send("<h1>Database not connected</h1>");
+    const result = await pool.query("SELECT * FROM picklists ORDER BY created_at DESC");
+    let html = `<h1>Saved Picklists (${result.rows.length})</h1><hr>`;
+    result.rows.forEach(r => {
+      const order = r.order_data;
+      html += `<div style="border:1px solid #ccc; padding:15px; margin:10px;">
+                 <h3>${order.name}</h3>
+                 <p>Customer: ${order.customer ? order.customer.first_name + ' ' + order.customer.last_name : 'N/A'}</p>
+               </div>`;
+    });
+    res.send(html);
+  } catch (err) {
+    res.send("Error loading picklists");
+  }
 });
 
-app.get("/", (req, res) => res.send("<h1>Picklist App is Running</h1><a href='/view-picklists'>View Picklists</a>"));
+app.get("/", (req, res) => {
+  res.send(`<h1>Picklist App Running</h1><p>Go to Shopify Orders → Select orders → ... menu</p>`);
+});
 
-app.listen(PORT, "0.0.0.0", () => console.log(`Server on ${PORT}`));
+app.listen(PORT, "0.0.0.0", () => {
+  console.log(`✅ Server running on port ${PORT}`);
+});

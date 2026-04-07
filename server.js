@@ -5,7 +5,7 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 // ================= ENV =================
-const SHOP = process.env.SHOPIFY_STORE;
+const SHOP = process.env.SHOP_NAME;
 const CLIENT_ID = process.env.SHOPIFY_CLIENT_ID;
 const CLIENT_SECRET = process.env.SHOPIFY_CLIENT_SECRET;
 

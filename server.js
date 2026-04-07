@@ -1,37 +1,58 @@
-import express from "express";
-import fetch from "node-fetch";
-import pkg from 'pg';
-const { Pool } = pkg;
+const express = require("express");
+const fetch = require("node-fetch");
+const { Pool } = require("pg");
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// ================= 1. CONFIG =================
-const RAW_SHOP = process.env.SHOP_NAME || process.env.SHOPIFY_STORE;
-const CLIENT_ID = process.env.SHOPIFY_CLIENT_ID;
-const CLIENT_SECRET = process.env.SHOPIFY_CLIENT_SECRET;
-const CLEAN_SHOP = RAW_SHOP?.replace('https://', '').replace('.myshopify.com', '').trim();
-const SHOP = `${CLEAN_SHOP}.myshopify.com`;
+// ================= CONFIG =================
+const SHOP = process.env.SHOP_NAME?.trim();
+const CLIENT_ID = process.env.SHOPIFY_CLIENT_ID?.trim();
+const CLIENT_SECRET = process.env.SHOPIFY_CLIENT_SECRET?.trim();
+const DATABASE_URL = process.env.DATABASE_URL || process.env.DATABASE_PRIVATE_URL;
 
+if (!SHOP || !CLIENT_ID || !CLIENT_SECRET) {
+  console.error("❌ Missing Shopify credentials in environment variables");
+}
+
+console.log("🚀 Starting Picklist App...");
+
+app.use(express.urlencoded({ extended: true }));
+app.use(express.json());
+
+// ================= DATABASE =================
 const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-  ssl: { rejectUnauthorized: false }
+  connectionString: DATABASE_URL,
+  ssl: { rejectUnauthorized: false },
+  max: 10,
+  idleTimeoutMillis: 30000,
 });
 
-// ================= 2. DB AUTO-REPAIR =================
-const initDb = async () => {
+async function initDB() {
   try {
-    await pool.query(`CREATE TABLE IF NOT EXISTS picklists (id SERIAL PRIMARY KEY, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);`);
-    await pool.query(`ALTER TABLE picklists ADD COLUMN IF NOT EXISTS order_number TEXT UNIQUE;`);
-    await pool.query(`ALTER TABLE picklists ADD COLUMN IF NOT EXISTS items_json JSONB;`);
-    console.log("✅ Database Ready");
-  } catch (err) { console.error("❌ DB Error:", err.message); }
-};
-initDb();
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS picklists (
+        id SERIAL PRIMARY KEY,
+        order_name TEXT UNIQUE,
+        order_data JSONB,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      );
+    `);
+    console.log("✅ Database table ready");
+  } catch (err) {
+    console.error("❌ DB Init Error:", err.message);
+  }
+}
+initDB();
 
-// ================= 3. AUTH =================
+// ================= TOKEN =================
+let cachedToken = null;
+let tokenExpiry = 0;
+
 async function getAccessToken() {
-  const response = await fetch(`https://${SHOP}/admin/oauth/access_token`, {
+  if (cachedToken && Date.now() < tokenExpiry) return cachedToken;
+
+  const res = await fetch(`https://${SHOP}.myshopify.com/admin/oauth/access_token`, {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
     body: new URLSearchParams({
@@ -40,133 +61,131 @@ async function getAccessToken() {
       client_secret: CLIENT_SECRET,
     }),
   });
-  const data = await response.json();
-  return data.access_token;
+
+  const data = await res.json();
+  if (!data.access_token) throw new Error("Failed to get Shopify token");
+
+  cachedToken = data.access_token;
+  tokenExpiry = Date.now() + 3400000; // ~57 minutes
+  return cachedToken;
 }
 
-// ================= 4. ROUTES =================
+// ================= ROUTES =================
 
-// HOME PAGE - Now with "Create Picklist" options
+// 1. Bulk Action from Shopify Orders (This makes "Create Picklist" appear in menu)
+app.get("/bulk-action", async (req, res) => {
+  const orderIds = req.query.ids ? req.query.ids.split(',') : [];
+  
+  if (orderIds.length === 0) {
+    return res.send("<h2>No orders selected</h2><a href='/'>Back</a>");
+  }
+
+  try {
+    const token = await getAccessToken();
+    const response = await fetch(
+      `https://${SHOP}.myshopify.com/admin/api/2025-01/orders.json?ids=${orderIds.join(',')}`,
+      { headers: { "X-Shopify-Access-Token": token } }
+    );
+
+    const data = await response.json();
+    const orders = data.orders || [];
+
+    // Save each order as picklist
+    for (const order of orders) {
+      await pool.query(
+        `INSERT INTO picklists (order_name, order_data) 
+         VALUES ($1, $2) 
+         ON CONFLICT (order_name) DO NOTHING`,
+        [order.name, JSON.stringify(order)]
+      );
+    }
+
+    res.redirect("/view-picklists");
+  } catch (err) {
+    console.error(err);
+    res.status(500).send("Error creating picklist: " + err.message);
+  }
+});
+
+// 2. View All Saved Picklists
+app.get("/view-picklists", async (req, res) => {
+  try {
+    const result = await pool.query("SELECT * FROM picklists ORDER BY created_at DESC");
+
+    let html = `
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <title>Picklists</title>
+        <script src="https://cdn.tailwindcss.com"></script>
+      </head>
+      <body class="bg-gray-50 p-8">
+        <div class="max-w-5xl mx-auto">
+          <h1 class="text-3xl font-bold mb-6">📦 Saved Picklists (${result.rows.length})</h1>
+          <a href="https://${SHOP}.myshopify.com/admin/orders" class="text-blue-600 mb-8 inline-block">← Back to Shopify Orders</a>
+    `;
+
+    if (result.rows.length === 0) {
+      html += "<p class='text-gray-500'>No picklists created yet.</p>";
+    } else {
+      result.rows.forEach(row => {
+        const order = row.order_data;
+        const items = order.line_items || [];
+        const totalItems = items.reduce((sum, i) => sum + i.quantity, 0);
+
+        html += `
+          <div class="bg-white border rounded-xl p-6 mb-6 shadow-sm">
+            <div class="flex justify-between items-start mb-4">
+              <div>
+                <h2 class="text-2xl font-semibold">${order.name}</h2>
+                <p class="text-gray-600">${order.customer?.first_name} ${order.customer?.last_name || ''}</p>
+              </div>
+              <div class="text-right">
+                <div class="text-xl font-bold">${totalItems} items</div>
+                <div class="text-sm text-gray-500">${new Date(row.created_at).toLocaleString('en-IN')}</div>
+              </div>
+            </div>
+            
+            <table class="w-full border-collapse text-sm">
+              <thead>
+                <tr class="bg-gray-100">
+                  <th class="text-left p-3">SKU</th>
+                  <th class="text-left p-3">Product</th>
+                  <th class="text-center p-3">Qty</th>
+                </tr>
+              </thead>
+              <tbody>
+                ${items.map(item => `
+                  <tr class="border-t">
+                    <td class="p-3 font-mono">${item.sku || '—'}</td>
+                    <td class="p-3">${item.title}</td>
+                    <td class="p-3 text-center font-semibold">${item.quantity}</td>
+                  </tr>
+                `).join('')}
+              </tbody>
+            </table>
+          </div>`;
+      });
+    }
+
+    html += `</div></body></html>`;
+    res.send(html);
+  } catch (err) {
+    res.status(500).send("Error: " + err.message);
+  }
+});
+
+// 3. Simple Home (for testing)
 app.get("/", (req, res) => {
   res.send(`
-    <div style="font-family:sans-serif; padding:40px; text-align:center; max-width:500px; margin:auto; border:1px solid #eee; border-radius:10px; margin-top:50px;">
-      <h1 style="color:#008060;">📦 Picklist System</h1>
-      <p style="color:#666;">Connected to: <b>${SHOP}</b></p>
-      <hr style="border:0; border-top:1px solid #eee; margin:20px 0;">
-      
-      <h3>Manual Create</h3>
-      <form action="/create-single" method="POST" style="margin-bottom:20px;">
-        <input type="text" name="orderName" placeholder="Enter Order # (e.g. #1001)" required 
-               style="padding:10px; width:70%; border:1px solid #ccc; border-radius:4px; margin-bottom:10px;">
-        <button type="submit" style="background:#008060; color:white; padding:10px 20px; border:none; border-radius:5px; cursor:pointer; width:75%;">
-          Create Picklist for this Order
-        </button>
-      </form>
-
-      <div style="background:#f4f6f8; padding:15px; border-radius:5px;">
-        <h3>Bulk Actions</h3>
-        <form action="/sync" method="POST" style="margin-bottom:10px;">
-          <button type="submit" style="background:#5c6ac4; color:white; padding:12px; border:none; border-radius:5px; cursor:pointer; width:100%;">
-            Sync All Unfulfilled Orders
-          </button>
-        </form>
-        <a href="/view" style="display:block; text-decoration:none; color:#008060; font-weight:bold; margin-top:10px;">View Saved Picklists →</a>
-      </div>
+    <div style="padding:40px; font-family:sans-serif; text-align:center;">
+      <h1>📦 Picklist App Ready</h1>
+      <p>Go to Shopify Orders → Select orders → Click "..." → Create Picklist</p>
+      <a href="/view-picklists">View All Picklists</a>
     </div>
   `);
 });
 
-// NEW: Manual Create Route (Finds 1 specific order by name)
-app.post("/create-single", express.urlencoded({ extended: true }), async (req, res) => {
-  const { orderName } = req.body;
-  try {
-    const token = await getAccessToken();
-    // Search Shopify for the specific order name
-    const response = await fetch(`https://${SHOP}/admin/api/2026-01/orders.json?name=${encodeURIComponent(orderName)}&status=any`, {
-      headers: { "X-Shopify-Access-Token": token }
-    });
-    const data = await response.json();
-
-    if (!data.orders || data.orders.length === 0) {
-      return res.send(`<h2>Order Not Found</h2><p>Could not find "${orderName}".</p><a href="/">Back</a>`);
-    }
-
-    const order = data.orders[0];
-    await pool.query(
-      "INSERT INTO picklists (order_number, items_json) VALUES ($1, $2) ON CONFLICT (order_number) DO NOTHING",
-      [order.name, JSON.stringify(order.line_items)]
-    );
-
-    res.redirect("/view");
-  } catch (err) { res.status(500).send(err.message); }
+app.listen(PORT, "0.0.0.0", () => {
+  console.log(`🚀 Picklist App running on port ${PORT}`);
 });
-
-// ROUTE: Bulk Action (Handles clicks from Shopify Admin Menu)
-app.get("/bulk-action", async (req, res) => {
-  const ids = req.query.ids; 
-  if (!ids) return res.redirect('/sync'); 
-
-  try {
-    const token = await getAccessToken();
-    const response = await fetch(`https://${SHOP}/admin/api/2026-01/orders.json?ids=${ids}`, {
-      headers: { "X-Shopify-Access-Token": token }
-    });
-    const data = await response.json();
-
-    for (const order of data.orders) {
-      await pool.query(
-        "INSERT INTO picklists (order_number, items_json) VALUES ($1, $2) ON CONFLICT (order_number) DO NOTHING",
-        [order.name, JSON.stringify(order.line_items)]
-      );
-    }
-    res.redirect("/view");
-  } catch (err) { res.status(500).send(err.message); }
-});
-
-// ROUTE: Sync All
-app.post("/sync", async (req, res) => {
-  try {
-    const token = await getAccessToken();
-    const response = await fetch(`https://${SHOP}/admin/api/2026-01/orders.json?status=unfulfilled`, {
-      headers: { "X-Shopify-Access-Token": token }
-    });
-    const data = await response.json();
-    for (const order of data.orders) {
-      await pool.query("INSERT INTO picklists (order_number, items_json) VALUES ($1, $2) ON CONFLICT (order_number) DO NOTHING", [order.name, JSON.stringify(order.line_items)]);
-    }
-    res.redirect("/view");
-  } catch (err) { res.status(500).send(err.message); }
-});
-
-// VIEW PAGE
-app.get("/view", async (req, res) => {
-  try {
-    const result = await pool.query("SELECT * FROM picklists ORDER BY created_at DESC");
-    let html = `
-      <div style="font-family:sans-serif; padding:20px; max-width:800px; margin:auto;">
-        <div style="display:flex; justify-content:space-between; align-items:center;">
-          <h1>Saved Picklists</h1>
-          <button onclick="window.print()" style="padding:10px 20px; cursor:pointer; background:#008060; color:white; border:none; border-radius:4px;">Print All</button>
-        </div>
-        <a href="/">← Back to Home</a><hr style="margin:20px 0;">
-    `;
-    
-    if (result.rows.length === 0) html += "<p>No picklists created yet.</p>";
-
-    result.rows.forEach(row => {
-      html += `
-        <div style="border:2px solid #000; padding:20px; margin-bottom:20px; border-radius:8px; background:#fff; page-break-inside: avoid;">
-          <div style="display:flex; justify-content:space-between; border-bottom:1px solid #eee; padding-bottom:10px;">
-            <b style="font-size:1.5em;">Order ${row.order_number}</b>
-            <span>Created: ${new Date(row.created_at).toLocaleDateString()}</span>
-          </div>
-          <ul style="margin-top:15px; font-size:1.1em; line-height:1.6;">
-            ${row.items_json.map(item => `<li><b>${item.quantity}x</b> ${item.title}</li>`).join('')}
-          </ul>
-        </div>`;
-    });
-    res.send(html + "</div>");
-  } catch (err) { res.status(500).send(err.message); }
-});
-
-app.listen(PORT, () => console.log(`🚀 App on port ${PORT}`));

@@ -11,24 +11,28 @@ const CLIENT_ID = (process.env.SHOPIFY_CLIENT_ID || "").trim();
 const CLIENT_SECRET = (process.env.SHOPIFY_CLIENT_SECRET || "").trim();
 const DATABASE_URL = process.env.DATABASE_URL || process.env.DATABASE_PRIVATE_URL;
 
-console.log("🚀 Starting Picklist App...");
+console.log("🚀 Starting Picklist App on Render...");
 console.log("SHOP_NAME:", SHOP ? "✅" : "❌");
 console.log("CLIENT_ID:", CLIENT_ID ? "✅" : "❌");
 console.log("CLIENT_SECRET:", CLIENT_SECRET ? "✅" : "❌");
 console.log("DATABASE_URL:", DATABASE_URL ? "✅" : "❌");
 
 if (!SHOP || !CLIENT_ID || !CLIENT_SECRET) {
-  console.error("❌ Missing Shopify credentials in Render Environment Variables");
+  console.error("❌ Missing Shopify credentials! Check Render Environment Variables.");
 }
 
 // ================= DATABASE =================
 const pool = DATABASE_URL ? new Pool({
   connectionString: DATABASE_URL,
   ssl: { rejectUnauthorized: false },
+  max: 8,
 }) : null;
 
 async function initDB() {
-  if (!pool) return console.warn("⚠️ Database disabled");
+  if (!pool) {
+    console.warn("⚠️ No DATABASE_URL - Database disabled");
+    return;
+  }
   try {
     await pool.query(`
       CREATE TABLE IF NOT EXISTS picklists (
@@ -38,7 +42,7 @@ async function initDB() {
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       );
     `);
-    console.log("✅ Database ready");
+    console.log("✅ Database table ready");
   } catch (err) {
     console.error("❌ DB Error:", err.message);
   }
@@ -63,14 +67,14 @@ async function getAccessToken() {
   });
 
   const data = await response.json();
-  if (!data.access_token) throw new Error("Token failed");
+  if (!data.access_token) throw new Error("Shopify token failed");
 
   cachedToken = data.access_token;
   tokenExpiry = Date.now() + 3400000;
   return cachedToken;
 }
 
-// ================= BULK ACTION (This creates the menu option) =================
+// ================= BULK ACTION (Creates the menu option in Shopify) =================
 app.get("/bulk-action", async (req, res) => {
   const ids = req.query.ids ? req.query.ids.split(",") : [];
   if (ids.length === 0) return res.redirect("/view-picklists");
@@ -108,9 +112,9 @@ app.get("/view-picklists", async (req, res) => {
     result.rows.forEach(r => {
       const order = r.order_data;
       html += `<div style="border:1px solid #ccc; padding:15px; margin:10px;">
-                 <h3>${order.name}</h3>
-                 <p>Customer: ${order.customer ? order.customer.first_name + ' ' + order.customer.last_name : 'N/A'}</p>
-               </div>`;
+        <h3>${order.name}</h3>
+        <p>Customer: ${order.customer ? order.customer.first_name + ' ' + (order.customer.last_name || '') : 'N/A'}</p>
+      </div>`;
     });
     res.send(html);
   } catch (err) {
@@ -119,9 +123,9 @@ app.get("/view-picklists", async (req, res) => {
 });
 
 app.get("/", (req, res) => {
-  res.send(`<h1>Picklist App Running</h1><p>Go to Shopify Orders → Select orders → ... menu</p>`);
+  res.send(`<h1 style="padding:40px;text-align:center;">📦 Picklist App Running</h1>`);
 });
 
 app.listen(PORT, "0.0.0.0", () => {
-  console.log(`✅ Server running on port ${PORT}`);
+  console.log(`✅ Server started on port ${PORT}`);
 });

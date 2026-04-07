@@ -1,18 +1,7 @@
 {
-  "name": "shopify-picklist-app",
-  "version": "1.0.0",
   "type": "module",
-  "scripts": {
-    "start": "node server.js",
-    "dev": "nodemon server.js"
-  },
   "dependencies": {
-    "@shopify/shopify-api": "^9.0.0",
-    "@shopify/shopify-app-express": "^4.0.0",
-    "@shopify/shopify-app-session-storage-postgresql": "^3.0.0",
-    "express": "^4.18.2"
-  },
-  "devDependencies": {
-    "nodemon": "^3.0.1"
+    "express": "^4.18.2",
+    "node-fetch": "^3.3.2"
   }
 }

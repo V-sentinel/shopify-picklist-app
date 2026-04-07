@@ -46,30 +46,68 @@ async function getAccessToken() {
 
 // ================= 4. ROUTES =================
 
+// HOME PAGE - Now with "Create Picklist" options
 app.get("/", (req, res) => {
   res.send(`
-    <div style="font-family:sans-serif; padding:40px; text-align:center;">
+    <div style="font-family:sans-serif; padding:40px; text-align:center; max-width:500px; margin:auto; border:1px solid #eee; border-radius:10px; margin-top:50px;">
       <h1 style="color:#008060;">📦 Picklist System</h1>
-      <p>Store: <b>${SHOP}</b></p>
-      <form action="/sync" method="POST">
-        <button type="submit" style="background:#008060; color:white; padding:15px 30px; border:none; border-radius:5px; cursor:pointer; font-weight:bold;">
-          Sync All Unfulfilled Orders
+      <p style="color:#666;">Connected to: <b>${SHOP}</b></p>
+      <hr style="border:0; border-top:1px solid #eee; margin:20px 0;">
+      
+      <h3>Manual Create</h3>
+      <form action="/create-single" method="POST" style="margin-bottom:20px;">
+        <input type="text" name="orderName" placeholder="Enter Order # (e.g. #1001)" required 
+               style="padding:10px; width:70%; border:1px solid #ccc; border-radius:4px; margin-bottom:10px;">
+        <button type="submit" style="background:#008060; color:white; padding:10px 20px; border:none; border-radius:5px; cursor:pointer; width:75%;">
+          Create Picklist for this Order
         </button>
       </form>
-      <br>
-      <a href="/view" style="color:#008060; text-decoration:none;">View Saved Picklists →</a>
+
+      <div style="background:#f4f6f8; padding:15px; border-radius:5px;">
+        <h3>Bulk Actions</h3>
+        <form action="/sync" method="POST" style="margin-bottom:10px;">
+          <button type="submit" style="background:#5c6ac4; color:white; padding:12px; border:none; border-radius:5px; cursor:pointer; width:100%;">
+            Sync All Unfulfilled Orders
+          </button>
+        </form>
+        <a href="/view" style="display:block; text-decoration:none; color:#008060; font-weight:bold; margin-top:10px;">View Saved Picklists →</a>
+      </div>
     </div>
   `);
 });
 
-// NEW: Action Menu Route (Handles the click from Shopify Admin)
+// NEW: Manual Create Route (Finds 1 specific order by name)
+app.post("/create-single", express.urlencoded({ extended: true }), async (req, res) => {
+  const { orderName } = req.body;
+  try {
+    const token = await getAccessToken();
+    // Search Shopify for the specific order name
+    const response = await fetch(`https://${SHOP}/admin/api/2026-01/orders.json?name=${encodeURIComponent(orderName)}&status=any`, {
+      headers: { "X-Shopify-Access-Token": token }
+    });
+    const data = await response.json();
+
+    if (!data.orders || data.orders.length === 0) {
+      return res.send(`<h2>Order Not Found</h2><p>Could not find "${orderName}".</p><a href="/">Back</a>`);
+    }
+
+    const order = data.orders[0];
+    await pool.query(
+      "INSERT INTO picklists (order_number, items_json) VALUES ($1, $2) ON CONFLICT (order_number) DO NOTHING",
+      [order.name, JSON.stringify(order.line_items)]
+    );
+
+    res.redirect("/view");
+  } catch (err) { res.status(500).send(err.message); }
+});
+
+// ROUTE: Bulk Action (Handles clicks from Shopify Admin Menu)
 app.get("/bulk-action", async (req, res) => {
-  const ids = req.query.ids; // Shopify sends order IDs in the URL
-  if (!ids) return res.redirect('/sync'); // If no specific IDs, just do a general sync
+  const ids = req.query.ids; 
+  if (!ids) return res.redirect('/sync'); 
 
   try {
     const token = await getAccessToken();
-    // Fetch specifically selected orders
     const response = await fetch(`https://${SHOP}/admin/api/2026-01/orders.json?ids=${ids}`, {
       headers: { "X-Shopify-Access-Token": token }
     });
@@ -81,16 +119,11 @@ app.get("/bulk-action", async (req, res) => {
         [order.name, JSON.stringify(order.line_items)]
       );
     }
-    res.send(`
-      <div style="font-family:sans-serif; text-align:center; padding:50px;">
-        <h2>✅ Success!</h2>
-        <p>Selected orders have been added to your picklist.</p>
-        <script>setTimeout(() => { window.location.href = '/view'; }, 1500);</script>
-      </div>
-    `);
+    res.redirect("/view");
   } catch (err) { res.status(500).send(err.message); }
 });
 
+// ROUTE: Sync All
 app.post("/sync", async (req, res) => {
   try {
     const token = await getAccessToken();
@@ -105,6 +138,7 @@ app.post("/sync", async (req, res) => {
   } catch (err) { res.status(500).send(err.message); }
 });
 
+// VIEW PAGE
 app.get("/view", async (req, res) => {
   try {
     const result = await pool.query("SELECT * FROM picklists ORDER BY created_at DESC");
@@ -114,13 +148,21 @@ app.get("/view", async (req, res) => {
           <h1>Saved Picklists</h1>
           <button onclick="window.print()" style="padding:10px 20px; cursor:pointer; background:#008060; color:white; border:none; border-radius:4px;">Print All</button>
         </div>
-        <a href="/">← Home</a><hr>
+        <a href="/">← Back to Home</a><hr style="margin:20px 0;">
     `;
+    
+    if (result.rows.length === 0) html += "<p>No picklists created yet.</p>";
+
     result.rows.forEach(row => {
       html += `
-        <div style="border:2px solid #000; padding:15px; margin-bottom:20px; border-radius:8px; background:#fff;">
-          <b style="font-size:1.2em;">Order ${row.order_number}</b>
-          <ul style="margin-top:10px;">${row.items_json.map(item => `<li>${item.quantity}x ${item.title}</li>`).join('')}</ul>
+        <div style="border:2px solid #000; padding:20px; margin-bottom:20px; border-radius:8px; background:#fff; page-break-inside: avoid;">
+          <div style="display:flex; justify-content:space-between; border-bottom:1px solid #eee; padding-bottom:10px;">
+            <b style="font-size:1.5em;">Order ${row.order_number}</b>
+            <span>Created: ${new Date(row.created_at).toLocaleDateString()}</span>
+          </div>
+          <ul style="margin-top:15px; font-size:1.1em; line-height:1.6;">
+            ${row.items_json.map(item => `<li><b>${item.quantity}x</b> ${item.title}</li>`).join('')}
+          </ul>
         </div>`;
     });
     res.send(html + "</div>");

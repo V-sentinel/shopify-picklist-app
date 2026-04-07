@@ -5,7 +5,7 @@ const { Pool } = require("pg");
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// ================= CONFIG & STARTUP LOGS =================
+// ================= CONFIG =================
 const SHOP = (process.env.SHOP_NAME || "").trim();
 const CLIENT_ID = (process.env.SHOPIFY_CLIENT_ID || "").trim();
 const CLIENT_SECRET = (process.env.SHOPIFY_CLIENT_SECRET || "").trim();
@@ -18,23 +18,21 @@ console.log("CLIENT_SECRET:", CLIENT_SECRET ? "✅ Set" : "❌ MISSING");
 console.log("DATABASE_URL:", DATABASE_URL ? "✅ Found" : "❌ MISSING");
 
 if (!SHOP || !CLIENT_ID || !CLIENT_SECRET) {
-  console.error("❌ CRITICAL: Missing Shopify credentials. Check Render Environment Variables.");
+  console.error("❌ Missing Shopify credentials! Check Environment Variables.");
 }
 
 // ================= DATABASE (Safe) =================
-let pool = null;
-if (DATABASE_URL) {
-  pool = new Pool({
-    connectionString: DATABASE_URL,
-    ssl: { rejectUnauthorized: false },
-    max: 8,
-  });
-} else {
-  console.warn("⚠️ No DATABASE_URL → Database disabled (picklists won't save)");
-}
+const pool = DATABASE_URL ? new Pool({
+  connectionString: DATABASE_URL,
+  ssl: { rejectUnauthorized: false },
+  max: 8,
+}) : null;
 
 async function initDB() {
-  if (!pool) return;
+  if (!pool) {
+    console.warn("⚠️ Database disabled (no DATABASE_URL)");
+    return;
+  }
   try {
     await pool.query(`
       CREATE TABLE IF NOT EXISTS picklists (
@@ -44,7 +42,7 @@ async function initDB() {
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       );
     `);
-    console.log("✅ Database ready");
+    console.log("✅ Database table ready");
   } catch (err) {
     console.error("❌ DB Error:", err.message);
   }
@@ -77,6 +75,8 @@ async function getAccessToken() {
 }
 
 // ================= ROUTES =================
+
+// Bulk Action from Shopify Orders menu
 app.get("/bulk-action", async (req, res) => {
   const ids = req.query.ids ? req.query.ids.split(",") : [];
   if (ids.length === 0) return res.redirect("/view-picklists");
@@ -92,7 +92,8 @@ app.get("/bulk-action", async (req, res) => {
     for (const order of (data.orders || [])) {
       if (pool) {
         await pool.query(
-          `INSERT INTO picklists (order_name, order_data) VALUES ($1, $2) ON CONFLICT (order_name) DO NOTHING`,
+          `INSERT INTO picklists (order_name, order_data) 
+           VALUES ($1, $2) ON CONFLICT (order_name) DO NOTHING`,
           [order.name, JSON.stringify(order)]
         );
       }
@@ -100,18 +101,18 @@ app.get("/bulk-action", async (req, res) => {
     res.redirect("/view-picklists");
   } catch (err) {
     console.error(err);
-    res.status(500).send("Error: " + err.message);
+    res.status(500).send("Error creating picklist");
   }
 });
 
+// View Picklists
 app.get("/view-picklists", async (req, res) => {
   try {
     if (!pool) return res.send("<h1>Database not connected</h1>");
     const result = await pool.query("SELECT * FROM picklists ORDER BY created_at DESC");
-    // Simple view for now
-    let html = "<h1>Saved Picklists</h1>";
-    result.rows.forEach(row => {
-      html += `<div><strong>${row.order_name}</strong></div>`;
+    let html = `<h1>Saved Picklists (${result.rows.length})</h1><a href="/">Back</a><hr>`;
+    result.rows.forEach(r => {
+      html += `<div><strong>${r.order_name}</strong></div>`;
     });
     res.send(html);
   } catch (err) {
@@ -121,13 +122,14 @@ app.get("/view-picklists", async (req, res) => {
 
 app.get("/", (req, res) => {
   res.send(`
-    <h1 style="padding:50px; text-align:center; font-family:sans-serif;">
-      📦 Picklist App Running on Render<br><br>
-      Select orders in Shopify → Click ... → Create Picklist
-    </h1>
+    <div style="padding:50px; font-family:sans-serif; text-align:center;">
+      <h1>📦 Picklist App is Running</h1>
+      <p>Select orders in Shopify → Click the ... menu → Create Picklist</p>
+      <a href="/view-picklists">View Saved Picklists</a>
+    </div>
   `);
 });
 
 app.listen(PORT, "0.0.0.0", () => {
-  console.log(`✅ Server successfully started on port ${PORT}`);
+  console.log(`✅ Server started successfully on port ${PORT}`);
 });

@@ -12,31 +12,59 @@ const CLIENT_SECRET = (process.env.SHOPIFY_CLIENT_SECRET || "").trim();
 const DATABASE_URL = process.env.DATABASE_URL || process.env.DATABASE_PRIVATE_URL;
 
 console.log("🚀 Starting Picklist App (ESM Version)...");
-console.log("SHOP_NAME:", SHOP ? "✅" : "❌ MISSING");
-console.log("CLIENT_ID:", CLIENT_ID ? "✅" : "❌ MISSING");
-console.log("CLIENT_SECRET:", CLIENT_SECRET ? "✅" : "❌ MISSING");
-console.log("DATABASE_URL:", DATABASE_URL ? "✅ Found" : "❌ MISSING");
+console.log("=" .repeat(50));
+console.log("📋 Configuration Check:");
+console.log(`  SHOP_NAME: ${SHOP ? "✅ " + SHOP : "❌ MISSING"}`);
+console.log(`  CLIENT_ID: ${CLIENT_ID ? "✅ Set" : "❌ MISSING"}`);
+console.log(`  CLIENT_SECRET: ${CLIENT_SECRET ? "✅ Set" : "❌ MISSING"}`);
+console.log(`  DATABASE_URL: ${DATABASE_URL ? "✅ Found" : "⚠️ Not set (will run without DB)"}`);
+console.log("=" .repeat(50));
 
+// Exit if critical env vars are missing
 if (!SHOP || !CLIENT_ID || !CLIENT_SECRET) {
-  console.error("❌ Missing Shopify credentials in Render Environment Variables");
+  console.error("\n❌ CRITICAL ERROR: Missing required Shopify credentials in environment variables");
+  console.error("   Please set: SHOP_NAME, SHOPIFY_CLIENT_ID, SHOPIFY_CLIENT_SECRET");
+  if (!DATABASE_URL) {
+    console.error("\n💡 Tip: You need at least database OR Shopify credentials to run");
+  }
+  // Don't exit immediately - let it try to run with what it has
 }
 
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
 // ================= DATABASE =================
-const pool = DATABASE_URL ? new Pool({
-  connectionString: DATABASE_URL,
-  ssl: { rejectUnauthorized: false },
-  max: 8,
-}) : null;
+let pool = null;
+
+if (DATABASE_URL) {
+  try {
+    pool = new Pool({
+      connectionString: DATABASE_URL,
+      ssl: { rejectUnauthorized: false },
+      max: 8,
+      connectionTimeoutMillis: 5000,
+    });
+    console.log("✅ Database pool created");
+  } catch (err) {
+    console.error("❌ Failed to create database pool:", err.message);
+    pool = null;
+  }
+} else {
+  console.warn("⚠️ No DATABASE_URL - Running without database (demo mode)");
+}
 
 async function initDB() {
   if (!pool) {
-    console.warn("⚠️ No DATABASE_URL - Database disabled");
-    return;
+    console.warn("⚠️ Database not available - skipping DB initialization");
+    return false;
   }
+  
   try {
+    // Test connection first
+    await pool.query("SELECT NOW()");
+    console.log("✅ Database connected successfully");
+    
+    // Create tables
     await pool.query(`
       CREATE TABLE IF NOT EXISTS picklists (
         id SERIAL PRIMARY KEY,
@@ -47,47 +75,116 @@ async function initDB() {
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       );
     `);
-    console.log("✅ Database Ready");
+    
+    // Create index for better performance
+    await pool.query(`
+      CREATE INDEX IF NOT EXISTS idx_picklists_order_name ON picklists(order_name);
+      CREATE INDEX IF NOT EXISTS idx_picklists_created_at ON picklists(created_at DESC);
+    `);
+    
+    console.log("✅ Database tables ready");
+    return true;
   } catch (err) {
-    console.error("❌ DB Error:", err.message);
+    console.error("❌ Database initialization error:", err.message);
+    if (err.message.includes("does not exist")) {
+      console.error("   💡 Database might not be provisioned yet. Create a PostgreSQL database in Render.");
+    }
+    return false;
   }
 }
-initDB();
 
-// ================= TOKEN =================
+// Initialize DB but don't block startup
+initDB().catch(err => console.error("DB init error:", err));
+
+// ================= TOKEN MANAGEMENT =================
 let cachedToken = null;
 let tokenExpiry = 0;
 
 async function getAccessToken() {
-  if (cachedToken && Date.now() < tokenExpiry) return cachedToken;
+  // Return cached token if still valid
+  if (cachedToken && Date.now() < tokenExpiry) {
+    console.log("✅ Using cached access token");
+    return cachedToken;
+  }
 
-  const response = await fetch(`https://${SHOP}.myshopify.com/admin/oauth/access_token`, {
-    method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body: new URLSearchParams({
-      grant_type: "client_credentials",
-      client_id: CLIENT_ID,
-      client_secret: CLIENT_SECRET,
-    }),
-  });
+  // Validate credentials before attempting token fetch
+  if (!SHOP || !CLIENT_ID || !CLIENT_SECRET) {
+    throw new Error("Missing Shopify credentials. Please check environment variables: SHOP_NAME, SHOPIFY_CLIENT_ID, SHOPIFY_CLIENT_SECRET");
+  }
 
-  const data = await response.json();
-  if (!data.access_token) throw new Error("Failed to get Shopify token");
+  const url = `https://${SHOP}.myshopify.com/admin/oauth/access_token`;
+  console.log(`🔄 Fetching new access token from ${url}`);
 
-  cachedToken = data.access_token;
-  tokenExpiry = Date.now() + 3400000;
-  return cachedToken;
+  try {
+    const response = await fetch(url, {
+      method: "POST",
+      headers: { 
+        "Content-Type": "application/x-www-form-urlencoded",
+        "User-Agent": "Picklist-App/1.0"
+      },
+      body: new URLSearchParams({
+        grant_type: "client_credentials",
+        client_id: CLIENT_ID,
+        client_secret: CLIENT_SECRET,
+      }),
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      console.error(`❌ Token fetch failed (${response.status}):`, errorText);
+      throw new Error(`Shopify token request failed: ${response.status} - ${errorText}`);
+    }
+
+    const data = await response.json();
+    
+    if (!data.access_token) {
+      console.error("❌ No access_token in response:", data);
+      throw new Error("Failed to get Shopify access token - invalid response");
+    }
+
+    cachedToken = data.access_token;
+    // Token expires in 1 hour, cache for 55 minutes (3,300,000 ms)
+    tokenExpiry = Date.now() + 3300000;
+    console.log("✅ New access token obtained and cached");
+    return cachedToken;
+  } catch (err) {
+    console.error("❌ Error fetching access token:", err.message);
+    throw err;
+  }
 }
 
 // ================= HELPER FUNCTIONS =================
 
 async function fetchOrderDetails(orderId) {
+  if (!orderId) {
+    throw new Error("Order ID is required");
+  }
+  
   const token = await getAccessToken();
-  const response = await fetch(
-    `https://${SHOP}.myshopify.com/admin/api/2025-01/orders/${orderId}.json`,
-    { headers: { "X-Shopify-Access-Token": token } }
-  );
+  const url = `https://${SHOP}.myshopify.com/admin/api/2025-01/orders/${orderId}.json`;
+  
+  console.log(`📦 Fetching order ${orderId} from Shopify...`);
+  
+  const response = await fetch(url, { 
+    headers: { 
+      "X-Shopify-Access-Token": token,
+      "User-Agent": "Picklist-App/1.0"
+    } 
+  });
+  
+  if (!response.ok) {
+    const errorText = await response.text();
+    console.error(`❌ Failed to fetch order ${orderId}: ${response.status}`, errorText);
+    throw new Error(`Shopify API error: ${response.status} - ${errorText.substring(0, 200)}`);
+  }
+  
   const data = await response.json();
+  
+  if (!data.order) {
+    throw new Error(`Order ${orderId} not found`);
+  }
+  
+  console.log(`✅ Order ${data.order.name} fetched successfully`);
   return data.order;
 }
 
@@ -96,8 +193,11 @@ function generatePicklistNumber() {
   const year = date.getFullYear();
   const month = String(date.getMonth() + 1).padStart(2, '0');
   const day = String(date.getDate()).padStart(2, '0');
-  const random = Math.floor(Math.random() * 10000).toString().padStart(4, '0');
-  return `PL-${year}${month}${day}-${random}`;
+  const hours = String(date.getHours()).padStart(2, '0');
+  const minutes = String(date.getMinutes()).padStart(2, '0');
+  const seconds = String(date.getSeconds()).padStart(2, '0');
+  const random = Math.floor(Math.random() * 1000).toString().padStart(3, '0');
+  return `PL-${year}${month}${day}-${hours}${minutes}${seconds}-${random}`;
 }
 
 function createPicklistData(order) {
@@ -106,13 +206,15 @@ function createPicklistData(order) {
     variant_id: item.variant_id,
     sku: item.sku || 'N/A',
     title: item.title,
-    variant_title: item.variant_title,
+    variant_title: item.variant_title || 'Default',
     quantity: item.quantity,
     price: item.price,
-    location: item.location_id || null,
+    location: item.location_id || 'Main Warehouse',
     barcode: item.barcode || null,
     grams: item.grams,
-    requires_shipping: item.requires_shipping
+    requires_shipping: item.requires_shipping,
+    fulfillment_service: item.fulfillment_service || 'manual',
+    picked_quantity: 0 // Track how many have been picked
   }));
 
   return {
@@ -123,81 +225,149 @@ function createPicklistData(order) {
       order_name: order.name,
       order_number: order.order_number,
       created_at: order.created_at,
-      financial_status: order.financial_status,
-      fulfillment_status: order.fulfillment_status,
-      tags: order.tags,
-      note: order.note
+      updated_at: order.updated_at,
+      financial_status: order.financial_status || 'pending',
+      fulfillment_status: order.fulfillment_status || 'unfulfilled',
+      tags: order.tags || '',
+      note: order.note || '',
+      total_price: order.total_price,
+      subtotal_price: order.subtotal_price,
+      total_tax: order.total_tax,
+      currency: order.currency
     },
     customer: order.customer ? {
       id: order.customer.id,
-      name: `${order.customer.first_name} ${order.customer.last_name || ''}`.trim(),
       email: order.customer.email,
-      phone: order.customer.phone
+      phone: order.customer.phone,
+      first_name: order.customer.first_name,
+      last_name: order.customer.last_name || '',
+      name: `${order.customer.first_name} ${order.customer.last_name || ''}`.trim()
     } : null,
     shipping_address: order.shipping_address ? {
       name: order.shipping_address.name,
       address1: order.shipping_address.address1,
-      address2: order.shipping_address.address2,
+      address2: order.shipping_address.address2 || '',
       city: order.shipping_address.city,
       province: order.shipping_address.province,
       zip: order.shipping_address.zip,
-      country: order.shipping_address.country
+      country: order.shipping_address.country,
+      phone: order.shipping_address.phone
     } : null,
     items: items,
     total_items: items.reduce((sum, item) => sum + item.quantity, 0),
     total_price: order.total_price,
     currency: order.currency,
-    status: 'pending',
-    notes: ''
+    status: 'pending', // pending, picking, packed, shipped
+    notes: '',
+    last_updated: new Date().toISOString()
   };
 }
 
 // ================= ROUTES =================
 
+// Health check endpoint (useful for Render)
+app.get("/health", (req, res) => {
+  res.json({ 
+    status: "healthy", 
+    timestamp: new Date().toISOString(),
+    database: pool ? "connected" : "disabled",
+    shop: SHOP || "not configured"
+  });
+});
+
 // 1. Bulk Action → Creates picklist for selected orders
 app.get("/bulk-action", async (req, res) => {
   const ids = req.query.ids ? req.query.ids.split(",") : [];
-  if (ids.length === 0) return res.redirect("/view-picklists");
+  
+  console.log(`📋 Bulk action triggered with ${ids.length} order(s):`, ids);
+  
+  if (ids.length === 0) {
+    console.warn("⚠️ No order IDs provided");
+    return res.redirect("/view-picklists?error=no_orders");
+  }
+
+  if (!pool) {
+    console.error("❌ Cannot create picklist - database not available");
+    return res.status(503).send(`
+      <h1>Database Not Available</h1>
+      <p>Please configure DATABASE_URL in environment variables.</p>
+      <a href="/">Go Home</a>
+    `);
+  }
 
   try {
     const picklists = [];
     
     for (const id of ids) {
-      const order = await fetchOrderDetails(id);
-      if (order) {
-        const picklistData = createPicklistData(order);
+      try {
+        const order = await fetchOrderDetails(id);
         
-        if (pool) {
+        if (order) {
+          const picklistData = createPicklistData(order);
+          
           await pool.query(
             `INSERT INTO picklists (order_name, order_data, picklist_data) 
              VALUES ($1, $2, $3) 
              ON CONFLICT (order_name) 
-             DO UPDATE SET order_data = $2, picklist_data = $3, updated_at = CURRENT_TIMESTAMP`,
+             DO UPDATE SET 
+               order_data = $2, 
+               picklist_data = $3, 
+               updated_at = CURRENT_TIMESTAMP`,
             [order.name, JSON.stringify(order), JSON.stringify(picklistData)]
           );
+          
+          picklists.push(picklistData);
+          console.log(`✅ Picklist created for order ${order.name}: ${picklistData.picklist_number}`);
         }
-        picklists.push(picklistData);
+      } catch (err) {
+        console.error(`❌ Failed to create picklist for order ${id}:`, err.message);
+        // Continue with other orders even if one fails
       }
     }
     
-    // Redirect to the picklist view with the newly created picklists
+    if (picklists.length === 0) {
+      throw new Error("No picklists were created successfully");
+    }
+    
     const idsParam = picklists.map(p => p.picklist_number).join(',');
-    res.redirect(`/view-picklists?highlight=${encodeURIComponent(idsParam)}`);
+    res.redirect(`/view-picklists?success=${encodeURIComponent(picklists.length)}&highlight=${encodeURIComponent(idsParam)}`);
   } catch (err) {
-    console.error(err);
-    res.status(500).send("Error creating picklist: " + err.message);
+    console.error("❌ Bulk action error:", err);
+    res.status(500).send(`
+      <h1>Error Creating Picklist</h1>
+      <p>${err.message}</p>
+      <pre>${err.stack}</pre>
+      <a href="/view-picklists">View Existing Picklists</a><br>
+      <a href="/">Go Home</a>
+    `);
   }
 });
 
 // 2. View Saved Picklists with detailed view
 app.get("/view-picklists", async (req, res) => {
+  const successCount = req.query.success;
+  const error = req.query.error;
+  const highlightPicklist = req.query.highlight || '';
+  
+  if (!pool) {
+    return res.status(503).send(`
+      <!DOCTYPE html>
+      <html>
+      <head><title>Database Error</title></head>
+      <body style="font-family: sans-serif; padding: 40px; text-align: center;">
+        <h1>⚠️ Database Not Configured</h1>
+        <p>Please set the DATABASE_URL environment variable in Render.</p>
+        <p>You need to create a PostgreSQL database and add the connection string.</p>
+        <a href="/">Go Home</a>
+      </body>
+      </html>
+    `);
+  }
+  
   try {
-    if (!pool) return res.send("<h1>Database not connected</h1>");
     const result = await pool.query(
       "SELECT * FROM picklists ORDER BY created_at DESC"
     );
-    
-    const highlightPicklist = req.query.highlight || '';
     
     let html = `
       <!DOCTYPE html>
@@ -223,6 +393,26 @@ app.get("/view-picklists", async (req, res) => {
             box-shadow: 0 2px 10px rgba(0,0,0,0.1);
           }
           .header h1 { margin-bottom: 10px; }
+          .alert {
+            padding: 15px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+            animation: slideDown 0.3s ease;
+          }
+          @keyframes slideDown {
+            from { transform: translateY(-20px); opacity: 0; }
+            to { transform: translateY(0); opacity: 1; }
+          }
+          .alert-success {
+            background: #d4edda;
+            color: #155724;
+            border: 1px solid #c3e6cb;
+          }
+          .alert-error {
+            background: #f8d7da;
+            color: #721c24;
+            border: 1px solid #f5c6cb;
+          }
           .stats {
             display: flex;
             gap: 20px;
@@ -243,14 +433,18 @@ app.get("/view-picklists", async (req, res) => {
             border-radius: 12px;
             margin-bottom: 20px;
             box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            display: flex;
+            gap: 15px;
+            flex-wrap: wrap;
+            align-items: center;
           }
           .filters input, .filters select {
             padding: 10px;
             border: 1px solid #ddd;
             border-radius: 6px;
             font-size: 14px;
-            margin-right: 10px;
           }
+          .filters input { flex: 1; min-width: 200px; }
           .picklist-grid {
             display: grid;
             gap: 20px;
@@ -356,6 +550,7 @@ app.get("/view-picklists", async (req, res) => {
             gap: 10px;
             margin-top: 20px;
             justify-content: flex-end;
+            flex-wrap: wrap;
           }
           button {
             padding: 10px 20px;
@@ -396,6 +591,12 @@ app.get("/view-picklists", async (req, res) => {
             background: #17a2b8;
             color: white;
           }
+          .status-select {
+            padding: 8px 15px;
+            border: 1px solid #ddd;
+            border-radius: 6px;
+            font-size: 14px;
+          }
           .notes-area {
             width: 100%;
             padding: 10px;
@@ -410,6 +611,13 @@ app.get("/view-picklists", async (req, res) => {
             .picklist-body { display: block !important; }
             .picklist-card { break-inside: avoid; margin-bottom: 20px; }
           }
+          @media (max-width: 768px) {
+            .stats { flex-direction: column; }
+            .filters { flex-direction: column; align-items: stretch; }
+            .filters input, .filters select { width: 100%; }
+            .items-table { font-size: 12px; }
+            .items-table th, .items-table td { padding: 8px; }
+          }
         </style>
       </head>
       <body>
@@ -417,28 +625,47 @@ app.get("/view-picklists", async (req, res) => {
           <div class="header">
             <h1>📦 Picklist Manager</h1>
             <p>Manage and track your order fulfillment picklists</p>
+    `;
+    
+    if (successCount) {
+      html += `<div class="alert alert-success">✅ Successfully created ${successCount} picklist(s)!</div>`;
+    }
+    if (error) {
+      html += `<div class="alert alert-error">⚠️ Error: ${error.replace(/_/g, ' ')}</div>`;
+    }
+    
+    const pendingCount = result.rows.filter(r => r.picklist_data?.status === 'pending').length;
+    const pickingCount = result.rows.filter(r => r.picklist_data?.status === 'picking').length;
+    const packedCount = result.rows.filter(r => r.picklist_data?.status === 'packed').length;
+    const shippedCount = result.rows.filter(r => r.picklist_data?.status === 'shipped').length;
+    
+    html += `
             <div class="stats">
               <div class="stat-card">
                 <h3>${result.rows.length}</h3>
                 <p>Total Picklists</p>
               </div>
               <div class="stat-card">
-                <h3>${result.rows.filter(r => r.picklist_data?.status === 'pending').length}</h3>
+                <h3>${pendingCount}</h3>
                 <p>Pending</p>
               </div>
               <div class="stat-card">
-                <h3>${result.rows.filter(r => r.picklist_data?.status === 'picking').length}</h3>
+                <h3>${pickingCount}</h3>
                 <p>In Progress</p>
               </div>
               <div class="stat-card">
-                <h3>${result.rows.filter(r => r.picklist_data?.status === 'packed').length}</h3>
+                <h3>${packedCount}</h3>
                 <p>Packed</p>
+              </div>
+              <div class="stat-card">
+                <h3>${shippedCount}</h3>
+                <p>Shipped</p>
               </div>
             </div>
           </div>
           
           <div class="filters">
-            <input type="text" id="searchInput" placeholder="🔍 Search by order #, customer, or picklist #..." style="width: 300px;">
+            <input type="text" id="searchInput" placeholder="🔍 Search by order #, customer, or picklist #...">
             <select id="statusFilter">
               <option value="">All Status</option>
               <option value="pending">Pending</option>
@@ -453,6 +680,16 @@ app.get("/view-picklists", async (req, res) => {
           <div class="picklist-grid" id="picklistGrid">
     `;
     
+    if (result.rows.length === 0) {
+      html += `
+        <div style="text-align: center; padding: 60px; background: white; border-radius: 12px;">
+          <h3>📭 No picklists yet</h3>
+          <p>Go to Shopify Admin → Orders → Select orders → Click "Create Picklist"</p>
+          <a href="/" style="color: #008060;">Return to Home</a>
+        </div>
+      `;
+    }
+    
     for (const row of result.rows) {
       const picklist = row.picklist_data || createPicklistData(row.order_data);
       const isHighlight = highlightPicklist.includes(picklist.picklist_number);
@@ -462,7 +699,7 @@ app.get("/view-picklists", async (req, res) => {
         <div class="picklist-card ${isHighlight ? 'highlight' : ''}" data-picklist-id="${picklist.picklist_number}" data-status="${picklist.status || 'pending'}">
           <div class="picklist-header" onclick="togglePicklist('${picklist.picklist_number}')">
             <div>
-              <h3>${picklist.picklist_number}</h3>
+              <h3>${escapeHtml(picklist.picklist_number)}</h3>
               <p style="color: #6c757d; margin-top: 5px;">Order: ${picklist.order_info.order_name} | ${new Date(picklist.created_at).toLocaleDateString()}</p>
             </div>
             <div>
@@ -475,19 +712,19 @@ app.get("/view-picklists", async (req, res) => {
               <div class="info-section">
                 <h4>👤 Customer Information</h4>
                 ${picklist.customer ? `
-                  <p><strong>Name:</strong> ${picklist.customer.name}</p>
-                  <p><strong>Email:</strong> ${picklist.customer.email || 'N/A'}</p>
-                  <p><strong>Phone:</strong> ${picklist.customer.phone || 'N/A'}</p>
+                  <p><strong>Name:</strong> ${escapeHtml(picklist.customer.name)}</p>
+                  <p><strong>Email:</strong> ${escapeHtml(picklist.customer.email || 'N/A')}</p>
+                  <p><strong>Phone:</strong> ${escapeHtml(picklist.customer.phone || 'N/A')}</p>
                 ` : '<p>No customer information</p>'}
               </div>
               <div class="info-section">
                 <h4>📮 Shipping Address</h4>
                 ${picklist.shipping_address ? `
-                  <p>${picklist.shipping_address.name || ''}</p>
-                  <p>${picklist.shipping_address.address1 || ''}</p>
-                  ${picklist.shipping_address.address2 ? `<p>${picklist.shipping_address.address2}</p>` : ''}
-                  <p>${picklist.shipping_address.city || ''}, ${picklist.shipping_address.province || ''} ${picklist.shipping_address.zip || ''}</p>
-                  <p>${picklist.shipping_address.country || ''}</p>
+                  <p>${escapeHtml(picklist.shipping_address.name || '')}</p>
+                  <p>${escapeHtml(picklist.shipping_address.address1 || '')}</p>
+                  ${picklist.shipping_address.address2 ? `<p>${escapeHtml(picklist.shipping_address.address2)}</p>` : ''}
+                  <p>${escapeHtml(picklist.shipping_address.city || '')}, ${escapeHtml(picklist.shipping_address.province || '')} ${escapeHtml(picklist.shipping_address.zip || '')}</p>
+                  <p>${escapeHtml(picklist.shipping_address.country || '')}</p>
                 ` : '<p>No shipping address</p>'}
               </div>
               <div class="info-section">
@@ -495,27 +732,33 @@ app.get("/view-picklists", async (req, res) => {
                 <p><strong>Order Status:</strong> ${picklist.order_info.financial_status || 'N/A'}</p>
                 <p><strong>Fulfillment:</strong> ${picklist.order_info.fulfillment_status || 'Not fulfilled'}</p>
                 <p><strong>Total:</strong> ${picklist.currency} ${picklist.total_price}</p>
-                ${picklist.order_info.tags ? `<p><strong>Tags:</strong> ${picklist.order_info.tags}</p>` : ''}
+                ${picklist.order_info.tags ? `<p><strong>Tags:</strong> ${escapeHtml(picklist.order_info.tags)}</p>` : ''}
               </div>
             </div>
             
             <h4>🛍️ Items to Pick</h4>
             <table class="items-table">
               <thead>
-                <tr><th>SKU</th><th>Product</th><th>Variant</th><th>Quantity</th><th>Picked</th><th>Location</th></tr>
+                <tr><th>SKU</th><th>Product</th><th>Variant</th><th>Required</th><th>Picked</th><th>Location</th></tr>
               </thead>
               <tbody>
       `;
       
       for (const item of picklist.items) {
+        const pickedQty = item.picked_quantity || 0;
         html += `
           <tr>
-            <td>${item.sku}</td>
-            <td>${item.title}</td>
-            <td>${item.variant_title || '-'}</td>
+            <td>${escapeHtml(item.sku)}</td>
+            <td>${escapeHtml(item.title)}</td>
+            <td>${escapeHtml(item.variant_title || '-')}</td>
             <td>${item.quantity}</td>
-            <td><input type="number" class="quantity-input" data-picklist="${picklist.picklist_number}" data-sku="${item.sku}" value="0" min="0" max="${item.quantity}"></td>
-            <td>${item.location || 'Main'}</td>
+            <td>
+              <input type="number" class="quantity-input" data-picklist="${picklist.picklist_number}" data-sku="${escapeHtml(item.sku)}" value="${pickedQty}" min="0" max="${item.quantity}">
+              <span style="font-size: 12px; color: ${pickedQty === item.quantity ? '#28a745' : '#dc3545'}">
+                ${pickedQty === item.quantity ? '✓ Complete' : `${item.quantity - pickedQty} left`}
+              </span>
+            </td>
+            <td>${escapeHtml(item.location)}</td>
           </tr>
         `;
       }
@@ -526,13 +769,13 @@ app.get("/view-picklists", async (req, res) => {
             
             <div>
               <label><strong>📝 Picklist Notes:</strong></label>
-              <textarea class="notes-area" id="notes-${picklist.picklist_number}" rows="3" placeholder="Add any notes about this picklist...">${picklist.notes || ''}</textarea>
+              <textarea class="notes-area" id="notes-${picklist.picklist_number}" rows="3" placeholder="Add any notes about this picklist...">${escapeHtml(picklist.notes || '')}</textarea>
             </div>
             
             <div class="action-buttons">
               <button class="btn-print" onclick="printPicklist('${picklist.picklist_number}')">🖨️ Print</button>
               <button class="btn-success" onclick="updatePickedQuantities('${picklist.picklist_number}')">✓ Update Picked</button>
-              <select id="status-${picklist.picklist_number}" class="status-select" style="padding: 10px;">
+              <select id="status-${picklist.picklist_number}" class="status-select">
                 <option value="pending" ${picklist.status === 'pending' ? 'selected' : ''}>Pending</option>
                 <option value="picking" ${picklist.status === 'picking' ? 'selected' : ''}>In Progress</option>
                 <option value="packed" ${picklist.status === 'packed' ? 'selected' : ''}>Packed</option>
@@ -569,7 +812,7 @@ app.get("/view-picklists", async (req, res) => {
           }
           
           async function updatePickedQuantities(picklistId) {
-            const inputs = document.querySelectorAll(\\`input[data-picklist="\${picklistId}"]\\`);
+            const inputs = document.querySelectorAll(\`input[data-picklist="\${picklistId}"]\`);
             const pickedItems = {};
             inputs.forEach(input => {
               const sku = input.dataset.sku;
@@ -586,9 +829,11 @@ app.get("/view-picklists", async (req, res) => {
             });
             
             if (response.ok) {
-              alert('Picked quantities updated successfully!');
+              alert('✅ Picked quantities updated successfully!');
+              location.reload();
             } else {
-              alert('Error updating picked quantities');
+              const error = await response.text();
+              alert('❌ Error updating picked quantities: ' + error);
             }
           }
           
@@ -604,14 +849,15 @@ app.get("/view-picklists", async (req, res) => {
             });
             
             if (response.ok) {
+              alert('✅ Status updated successfully!');
               location.reload();
             } else {
-              alert('Error updating status');
+              alert('❌ Error updating status');
             }
           }
           
           async function deletePicklist(picklistId) {
-            if (confirm('Are you sure you want to delete this picklist?')) {
+            if (confirm('⚠️ Are you sure you want to delete this picklist? This action cannot be undone.')) {
               const response = await fetch('/api/delete-picklist', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -619,66 +865,68 @@ app.get("/view-picklists", async (req, res) => {
               });
               
               if (response.ok) {
+                alert('✅ Picklist deleted successfully');
                 location.reload();
               } else {
-                alert('Error deleting picklist');
+                alert('❌ Error deleting picklist');
               }
             }
           }
           
           function exportToCSV() {
-            const rows = [];
+            const rows = [['Picklist #', 'Order #', 'Customer', 'SKU', 'Product', 'Quantity', 'Status', 'Created Date']];
             const cards = document.querySelectorAll('.picklist-card');
             cards.forEach(card => {
               const picklistId = card.querySelector('.picklist-header h3').innerText;
-              const orderName = card.querySelector('.picklist-header p').innerText.split('|')[0].trim();
+              const orderText = card.querySelector('.picklist-header p').innerText;
+              const orderName = orderText.split('|')[0].trim();
+              const customerName = card.querySelector('.info-section:first-child p:first-child')?.innerText.replace('Name:', '').trim() || 'N/A';
               const status = card.querySelector('.status').innerText;
+              const createdDate = orderText.split('|')[1]?.trim() || '';
               const items = card.querySelectorAll('.items-table tbody tr');
               items.forEach(item => {
                 const sku = item.cells[0].innerText;
                 const product = item.cells[1].innerText;
                 const quantity = item.cells[3].innerText;
-                rows.push([picklistId, orderName, sku, product, quantity, status]);
+                rows.push([picklistId, orderName, customerName, sku, product, quantity, status, createdDate]);
               });
             });
             
-            const csvContent = 'Picklist #,Order #,SKU,Product,Quantity,Status\\n' + 
-              rows.map(row => row.join(',')).join('\\n');
+            const csvContent = rows.map(row => row.map(cell => \`"\${String(cell).replace(/"/g, '""')}"\`).join(',')).join('\\n');
             
-            const blob = new Blob([csvContent], { type: 'text/csv' });
+            const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
             const url = URL.createObjectURL(blob);
             const a = document.createElement('a');
             a.href = url;
-            a.download = 'picklists_export.csv';
+            a.download = \`picklists_export_\${new Date().toISOString().slice(0,19).replace(/:/g, '-')}.csv\`;
             a.click();
             URL.revokeObjectURL(url);
           }
           
           // Filter functionality
-          document.getElementById('searchInput').addEventListener('input', filterPicklists);
-          document.getElementById('statusFilter').addEventListener('change', filterPicklists);
+          const searchInput = document.getElementById('searchInput');
+          const statusFilter = document.getElementById('statusFilter');
+          
+          if (searchInput) searchInput.addEventListener('input', filterPicklists);
+          if (statusFilter) statusFilter.addEventListener('change', filterPicklists);
           
           function filterPicklists() {
-            const searchTerm = document.getElementById('searchInput').value.toLowerCase();
-            const statusFilter = document.getElementById('statusFilter').value;
+            const searchTerm = document.getElementById('searchInput')?.value.toLowerCase() || '';
+            const statusFilterValue = document.getElementById('statusFilter')?.value || '';
             const cards = document.querySelectorAll('.picklist-card');
             
             cards.forEach(card => {
               const text = card.innerText.toLowerCase();
               const status = card.dataset.status;
               const matchesSearch = text.includes(searchTerm);
-              const matchesStatus = !statusFilter || status === statusFilter;
+              const matchesStatus = !statusFilterValue || status === statusFilterValue;
               
-              if (matchesSearch && matchesStatus) {
-                card.style.display = '';
-              } else {
-                card.style.display = 'none';
-              }
+              card.style.display = (matchesSearch && matchesStatus) ? '' : 'none';
             });
           }
           
-          // Open first picklist by default
-          if (document.querySelector('.picklist-card')) {
+          // Open first picklist by default on mobile
+          if (window.innerWidth <= 768 && document.querySelector('.picklist-card')) {
             const firstId = document.querySelector('.picklist-card .picklist-header h3').innerText;
             togglePicklist(firstId);
           }
@@ -689,14 +937,38 @@ app.get("/view-picklists", async (req, res) => {
     
     res.send(html);
   } catch (err) {
-    console.error(err);
-    res.status(500).send("Error loading picklists: " + err.message);
+    console.error("❌ Error loading picklists:", err);
+    res.status(500).send(`
+      <h1>Error Loading Picklists</h1>
+      <p>${err.message}</p>
+      <pre>${err.stack}</pre>
+      <a href="/">Go Home</a>
+    `);
   }
 });
+
+// Helper function to escape HTML
+function escapeHtml(str) {
+  if (!str) return '';
+  return str
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
 
 // 4. API endpoint to update picked quantities
 app.post("/api/update-picked", async (req, res) => {
   const { picklistId, pickedItems } = req.body;
+  
+  if (!picklistId) {
+    return res.status(400).json({ error: "Picklist ID is required" });
+  }
+  
+  if (!pool) {
+    return res.status(503).json({ error: "Database not available" });
+  }
   
   try {
     const result = await pool.query(
@@ -725,7 +997,7 @@ app.post("/api/update-picked", async (req, res) => {
     
     res.json({ success: true });
   } catch (err) {
-    console.error(err);
+    console.error("❌ Error updating picked quantities:", err);
     res.status(500).json({ error: err.message });
   }
 });
@@ -733,6 +1005,14 @@ app.post("/api/update-picked", async (req, res) => {
 // 5. API endpoint to update status
 app.post("/api/update-status", async (req, res) => {
   const { picklistId, status, notes } = req.body;
+  
+  if (!picklistId) {
+    return res.status(400).json({ error: "Picklist ID is required" });
+  }
+  
+  if (!pool) {
+    return res.status(503).json({ error: "Database not available" });
+  }
   
   try {
     const result = await pool.query(
@@ -756,7 +1036,7 @@ app.post("/api/update-status", async (req, res) => {
     
     res.json({ success: true });
   } catch (err) {
-    console.error(err);
+    console.error("❌ Error updating status:", err);
     res.status(500).json({ error: err.message });
   }
 });
@@ -765,21 +1045,37 @@ app.post("/api/update-status", async (req, res) => {
 app.post("/api/delete-picklist", async (req, res) => {
   const { picklistId } = req.body;
   
+  if (!picklistId) {
+    return res.status(400).json({ error: "Picklist ID is required" });
+  }
+  
+  if (!pool) {
+    return res.status(503).json({ error: "Database not available" });
+  }
+  
   try {
-    await pool.query(
-      "DELETE FROM picklists WHERE picklist_data->>'picklist_number' = $1",
+    const result = await pool.query(
+      "DELETE FROM picklists WHERE picklist_data->>'picklist_number' = $1 RETURNING id",
       [picklistId]
     );
     
-    res.json({ success: true });
+    if (result.rowCount === 0) {
+      return res.status(404).json({ error: "Picklist not found" });
+    }
+    
+    res.json({ success: true, deleted: true });
   } catch (err) {
-    console.error(err);
+    console.error("❌ Error deleting picklist:", err);
     res.status(500).json({ error: err.message });
   }
 });
 
 // 7. API endpoint to get single picklist (for AJAX)
 app.get("/api/picklist/:id", async (req, res) => {
+  if (!pool) {
+    return res.status(503).json({ error: "Database not available" });
+  }
+  
   try {
     const result = await pool.query(
       "SELECT * FROM picklists WHERE picklist_data->>'picklist_number' = $1",
@@ -792,6 +1088,7 @@ app.get("/api/picklist/:id", async (req, res) => {
     
     res.json(result.rows[0].picklist_data);
   } catch (err) {
+    console.error("❌ Error fetching picklist:", err);
     res.status(500).json({ error: err.message });
   }
 });
@@ -804,8 +1101,9 @@ app.get("/", (req, res) => {
     <head>
       <meta charset="UTF-8">
       <meta name="viewport" content="width=device-width, initial-scale=1.0">
-      <title>Picklist App</title>
+      <title>Picklist App - Shopify Order Fulfillment</title>
       <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
         body {
           font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
           background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
@@ -814,18 +1112,34 @@ app.get("/", (req, res) => {
           display: flex;
           align-items: center;
           justify-content: center;
+          padding: 20px;
         }
         .container {
           background: white;
           border-radius: 20px;
           padding: 50px;
-          max-width: 600px;
+          max-width: 650px;
           text-align: center;
           box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+          animation: fadeInUp 0.6s ease;
+        }
+        @keyframes fadeInUp {
+          from {
+            opacity: 0;
+            transform: translateY(30px);
+          }
+          to {
+            opacity: 1;
+            transform: translateY(0);
+          }
         }
         h1 {
           color: #008060;
           font-size: 48px;
+          margin-bottom: 10px;
+        }
+        .emoji {
+          font-size: 64px;
           margin-bottom: 20px;
         }
         p {
@@ -841,21 +1155,33 @@ app.get("/", (req, res) => {
           text-decoration: none;
           border-radius: 8px;
           font-weight: 600;
-          transition: background 0.3s;
+          transition: all 0.3s;
+          margin: 5px;
         }
         .button:hover {
           background: #004c3f;
+          transform: translateY(-2px);
+          box-shadow: 0 5px 15px rgba(0,0,0,0.2);
+        }
+        .button-outline {
+          background: transparent;
+          border: 2px solid #008060;
+          color: #008060;
+        }
+        .button-outline:hover {
+          background: #008060;
+          color: white;
         }
         .steps {
           text-align: left;
           background: #f8f9fa;
-          padding: 20px;
+          padding: 25px;
           border-radius: 10px;
           margin-top: 30px;
         }
         .steps h3 {
           color: #333;
-          margin-bottom: 10px;
+          margin-bottom: 15px;
         }
         .steps ol {
           margin-left: 20px;
@@ -864,22 +1190,43 @@ app.get("/", (req, res) => {
         .steps li {
           margin: 10px 0;
         }
+        .status-badge {
+          display: inline-block;
+          background: #e8f5e9;
+          color: #2e7d32;
+          padding: 5px 10px;
+          border-radius: 5px;
+          font-size: 12px;
+          margin-top: 20px;
+        }
+        @media (max-width: 600px) {
+          .container { padding: 30px 20px; }
+          h1 { font-size: 32px; }
+          .button { display: block; margin: 10px; }
+        }
       </style>
     </head>
     <body>
       <div class="container">
-        <h1>📦 Picklist App</h1>
+        <div class="emoji">📦</div>
+        <h1>Picklist App</h1>
         <p>Streamline your order fulfillment process with organized picklists</p>
-        <a href="/view-picklists" class="button">View All Picklists →</a>
+        <div>
+          <a href="/view-picklists" class="button">View All Picklists →</a>
+          <a href="/health" class="button button-outline">Health Check</a>
+        </div>
         <div class="steps">
-          <h3>How to use:</h3>
+          <h3>📋 How to use:</h3>
           <ol>
-            <li>Go to Shopify Admin → Orders</li>
-            <li>Select one or more orders</li>
+            <li>Go to <strong>Shopify Admin → Orders</strong></li>
+            <li>Select one or more orders using checkboxes</li>
             <li>Click the <strong>...</strong> (more actions) menu</li>
             <li>Select <strong>Create Picklist</strong></li>
             <li>View and manage your picklists below</li>
           </ol>
+        </div>
+        <div class="status-badge">
+          ✅ App is running | ${SHOP ? `Shop: ${SHOP}` : 'No shop configured'}
         </div>
       </div>
     </body>
@@ -887,7 +1234,56 @@ app.get("/", (req, res) => {
   `);
 });
 
-app.listen(PORT, "0.0.0.0", () => {
+// Error handling middleware
+app.use((err, req, res, next) => {
+  console.error("❌ Unhandled error:", err);
+  res.status(500).json({ 
+    error: "Internal server error", 
+    message: err.message,
+    timestamp: new Date().toISOString()
+  });
+});
+
+// 404 handler
+app.use((req, res) => {
+  res.status(404).send(`
+    <h1>404 - Page Not Found</h1>
+    <p>The page you're looking for doesn't exist.</p>
+    <a href="/">Go Home</a>
+  `);
+});
+
+// Start server
+const server = app.listen(PORT, "0.0.0.0", () => {
+  console.log("\n" + "=".repeat(50));
   console.log(`✅ Server started successfully on port ${PORT}`);
-  console.log(`📋 Open: http://localhost:${PORT}`);
+  console.log(`🌐 Local URL: http://localhost:${PORT}`);
+  console.log(`🏥 Health check: http://localhost:${PORT}/health`);
+  console.log(`📋 Picklists: http://localhost:${PORT}/view-picklists`);
+  console.log("=".repeat(50) + "\n");
+});
+
+// Graceful shutdown
+process.on('SIGTERM', () => {
+  console.log('SIGTERM signal received: closing HTTP server');
+  server.close(async () => {
+    console.log('HTTP server closed');
+    if (pool) {
+      await pool.end();
+      console.log('Database pool closed');
+    }
+    process.exit(0);
+  });
+});
+
+process.on('SIGINT', () => {
+  console.log('SIGINT signal received: closing HTTP server');
+  server.close(async () => {
+    console.log('HTTP server closed');
+    if (pool) {
+      await pool.end();
+      console.log('Database pool closed');
+    }
+    process.exit(0);
+  });
 });

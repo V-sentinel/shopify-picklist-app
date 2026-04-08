@@ -1,0 +1,34 @@
+# Shopify App Configuration
+
+name = "Picklist App"
+client_id = "your_client_id_here"  # Get from Shopify Partners Dashboard
+
+application_url = "https://your-app.onrender.com"  # Your Render URL
+embedded = true
+
+[access_scopes]
+# Required scopes for the app
+scopes = "read_orders, write_draft_orders, read_customers, write_fulfillments"
+
+[auth]
+redirect_urls = [
+  "https://your-app.onrender.com/auth/callback",
+  "https://your-app.onrender.com/api/auth/callback"
+]
+
+[[extensions]]
+type = "ui_extension"
+name = "Create Picklist"
+handle = "picklist-action"
+description = "Create picklists from selected orders"
+
+[[extensions.targeting]]
+target = "admin.order-index.selection-action.render"
+module = "./extensions/picklist-extension/src/index.jsx"
+
+[[extensions.targeting]]
+target = "admin.order-index.selection-action.should-render"
+module = "./extensions/picklist-extension/src/should-render.jsx"
+
+[webhooks]
+api_version = "2025-01"

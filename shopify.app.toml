@@ -3,17 +3,16 @@
 name = "Picklist App"
 client_id = "your_client_id_here"  # Get from Shopify Partners Dashboard
 
-application_url = "https://your-app.onrender.com"  # Your Render URL
+application_url = "https://your-app.onrender.com"  # Your Railway URL
 embedded = true
 
 [access_scopes]
 # Required scopes for the app
-scopes = "read_orders, write_draft_orders, read_customers, write_fulfillments"
+scopes = "read_orders,write_draft_orders,read_customers,write_fulfillments"
 
 [auth]
 redirect_urls = [
-  "https://your-app.onrender.com/auth/callback",
-  "https://your-app.onrender.com/api/auth/callback"
+  "https://your-app.onrender.com/auth/callback"
 ]
 
 [[extensions]]

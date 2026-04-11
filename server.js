@@ -1,6 +1,8 @@
 import express from "express";
 import fetch from "node-fetch";
 import { Pool } from "pg";
+import cors from "cors";
+import attachBulkActionRoutes from "./index.js";
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -9,6 +11,7 @@ const PORT = process.env.PORT || 3000;
 const SHOP = (process.env.SHOP_NAME || "").trim();
 const CLIENT_ID = (process.env.SHOPIFY_CLIENT_ID || "").trim();
 const CLIENT_SECRET = (process.env.SHOPIFY_CLIENT_SECRET || "").trim();
+const ADMIN_ACCESS_TOKEN = (process.env.SHOPIFY_ADMIN_ACCESS_TOKEN || process.env.SHOPIFY_ACCESS_TOKEN || "").trim();
 const DATABASE_URL = process.env.DATABASE_URL || process.env.DATABASE_PRIVATE_URL;
 
 console.log("🚀 Starting Picklist App (ESM Version)...");
@@ -17,10 +20,7 @@ console.log("📋 Configuration Check:");
 console.log(`  SHOP_NAME: ${SHOP ? "✅ " + SHOP : "❌ MISSING"}`);
 console.log(`  CLIENT_ID: ${CLIENT_ID ? "✅ Set" : "❌ MISSING"}`);
 console.log(`  CLIENT_SECRET: ${CLIENT_SECRET ? "✅ Set" : "❌ MISSING"}`);
-console.log(`  DATABASE_URL: ${DATABASE_URL ? "✅ Found" : "⚠️ Not set (will run without DB)"}`);
-console.log("=" .repeat(50));
-
-// Exit if critical env vars are missing
+console.log(`  ADMIN_ACCESS_TOKEN: ${ADMIN_ACCESS_TOKEN ? "✅ Set" : "⚠️ Not set"}`);
 if (!SHOP || !CLIENT_ID || !CLIENT_SECRET) {
   console.error("\n❌ CRITICAL ERROR: Missing required Shopify credentials in environment variables");
   console.error("   Please set: SHOP_NAME, SHOPIFY_CLIENT_ID, SHOPIFY_CLIENT_SECRET");
@@ -32,6 +32,10 @@ if (!SHOP || !CLIENT_ID || !CLIENT_SECRET) {
 
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
+app.use(cors({
+  origin: ["https://*.myshopify.com", "https://*.shopifyapps.com"],
+  credentials: true,
+}));
 
 // ================= DATABASE =================
 let pool = null;
@@ -52,9 +56,155 @@ if (DATABASE_URL) {
 } else {
   console.warn("⚠️ No DATABASE_URL - Running without database (demo mode)");
 }
-
+npm install -g @shopify/cli
+shopify app devnpm install -g @shopify/cli
+shopify app dev
 async function initDB() {
-  if (!pool) {
+  if (!pool) {  # Check for running Node processes
+  ps aux | grep node
+  
+  # Check if port 3000 is in use
+  lsof -i :3000  # Check for running Node processes
+  ps aux | grep node
+  
+  # Check if port 3000 is in use
+  lsof -i :3000  # Check for running Node processes
+  ps aux | grep node
+  
+  # Check if port 3000 is in use
+  lsof -i :3000  # Check for running Node processes
+  ps aux | grep node
+  
+  # Check if port 3000 is in use
+  lsof -i :3000  # Check for running Node processes
+  ps aux | grep node
+  
+  # Check if port 3000 is in use
+  lsof -i :3000  # Check for running Node processes
+  ps aux | grep node
+  
+  # Check if port 3000 is in use
+  lsof -i :3000  # Check for running Node processes
+  ps aux | grep node
+  
+  # Check if port 3000 is in use
+  lsof -i :3000  # Check for running Node processes
+  ps aux | grep node
+  
+  # Check if port 3000 is in use
+  lsof -i :3000  # Check for running Node processes
+  ps aux | grep node
+  
+  # Check if port 3000 is in use
+  lsof -i :3000  # Check for running Node processes
+  ps aux | grep node
+  
+  # Check if port 3000 is in use
+  lsof -i :3000  # Check for running Node processes
+  ps aux | grep node
+  
+  # Check if port 3000 is in use
+  lsof -i :3000  # Check for running Node processes
+  ps aux | grep node
+  
+  # Check if port 3000 is in use
+  lsof -i :3000  # Check for running Node processes
+  ps aux | grep node
+  
+  # Check if port 3000 is in use
+  lsof -i :3000  # Check for running Node processes
+  ps aux | grep node
+  
+  # Check if port 3000 is in use
+  lsof -i :3000  # Check for running Node processes
+  ps aux | grep node
+  
+  # Check if port 3000 is in use
+  lsof -i :3000  # Check for running Node processes
+  ps aux | grep node
+  
+  # Check if port 3000 is in use
+  lsof -i :3000  # Check for running Node processes
+  ps aux | grep node
+  
+  # Check if port 3000 is in use
+  lsof -i :3000  # Check for running Node processes
+  ps aux | grep node
+  
+  # Check if port 3000 is in use
+  lsof -i :3000  # Check for running Node processes
+  ps aux | grep node
+  
+  # Check if port 3000 is in use
+  lsof -i :3000  # Check for running Node processes
+  ps aux | grep node
+  
+  # Check if port 3000 is in use
+  lsof -i :3000  # Check for running Node processes
+  ps aux | grep node
+  
+  # Check if port 3000 is in use
+  lsof -i :3000  # Check for running Node processes
+  ps aux | grep node
+  
+  # Check if port 3000 is in use
+  lsof -i :3000  # Check for running Node processes
+  ps aux | grep node
+  
+  # Check if port 3000 is in use
+  lsof -i :3000  # Check for running Node processes
+  ps aux | grep node
+  
+  # Check if port 3000 is in use
+  lsof -i :3000  # Check for running Node processes
+  ps aux | grep node
+  
+  # Check if port 3000 is in use
+  lsof -i :3000  # Check for running Node processes
+  ps aux | grep node
+  
+  # Check if port 3000 is in use
+  lsof -i :3000  # Check for running Node processes
+  ps aux | grep node
+  
+  # Check if port 3000 is in use
+  lsof -i :3000  # Check for running Node processes
+  ps aux | grep node
+  
+  # Check if port 3000 is in use
+  lsof -i :3000  # Check for running Node processes
+  ps aux | grep node
+  
+  # Check if port 3000 is in use
+  lsof -i :3000  # Check for running Node processes
+  ps aux | grep node
+  
+  # Check if port 3000 is in use
+  lsof -i :3000  # Check for running Node processes
+  ps aux | grep node
+  
+  # Check if port 3000 is in use
+  lsof -i :3000  # Check for running Node processes
+  ps aux | grep node
+  
+  # Check if port 3000 is in use
+  lsof -i :3000  # Check for running Node processes
+  ps aux | grep node
+  
+  # Check if port 3000 is in use
+  lsof -i :3000  # Check for running Node processes
+  ps aux | grep node
+  
+  # Check if port 3000 is in use
+  lsof -i :3000  # Check for running Node processes
+  ps aux | grep node
+  
+  # Check if port 3000 is in use
+  lsof -i :3000  # Check for running Node processes
+  ps aux | grep node
+  
+  # Check if port 3000 is in use
+  lsof -i :3000
     console.warn("⚠️ Database not available - skipping DB initialization");
     return false;
   }
@@ -101,56 +251,18 @@ let cachedToken = null;
 let tokenExpiry = 0;
 
 async function getAccessToken() {
-  // Return cached token if still valid
-  if (cachedToken && Date.now() < tokenExpiry) {
-    console.log("✅ Using cached access token");
-    return cachedToken;
+  if (ADMIN_ACCESS_TOKEN) {
+    console.log("✅ Using configured Shopify admin access token");
+    return ADMIN_ACCESS_TOKEN;
   }
 
-  // Validate credentials before attempting token fetch
   if (!SHOP || !CLIENT_ID || !CLIENT_SECRET) {
     throw new Error("Missing Shopify credentials. Please check environment variables: SHOP_NAME, SHOPIFY_CLIENT_ID, SHOPIFY_CLIENT_SECRET");
   }
 
-  const url = `https://${SHOP}.myshopify.com/admin/oauth/access_token`;
-  console.log(`🔄 Fetching new access token from ${url}`);
-
-  try {
-    const response = await fetch(url, {
-      method: "POST",
-      headers: { 
-        "Content-Type": "application/x-www-form-urlencoded",
-        "User-Agent": "Picklist-App/1.0"
-      },
-      body: new URLSearchParams({
-        grant_type: "client_credentials",
-        client_id: CLIENT_ID,
-        client_secret: CLIENT_SECRET,
-      }),
-    });
-
-    if (!response.ok) {
-      const errorText = await response.text();
-      console.error(`❌ Token fetch failed (${response.status}):`, errorText);
-      throw new Error(`Shopify token request failed: ${response.status} - ${errorText}`);
-    }
-
-    const data = await response.json();
-    
-    if (!data.access_token) {
-      console.error("❌ No access_token in response:", data);
-      throw new Error("Failed to get Shopify access token - invalid response");
-    }
-
-    cachedToken = data.access_token;
-    // Token expires in 1 hour, cache for 55 minutes (3,300,000 ms)
-    tokenExpiry = Date.now() + 3300000;
-    console.log("✅ New access token obtained and cached");
-    return cachedToken;
-  } catch (err) {
-    console.error("❌ Error fetching access token:", err.message);
-    throw err;
-  }
+  throw new Error(
+    "Shopify OAuth is not implemented in this app. Please set SHOPIFY_ADMIN_ACCESS_TOKEN or add a proper OAuth flow."
+  );
 }
 
 // ================= HELPER FUNCTIONS =================
@@ -262,6 +374,128 @@ function createPicklistData(order) {
     last_updated: new Date().toISOString()
   };
 }
+
+attachBulkActionRoutes({ app, getPool: () => pool, fetchOrderDetails, createPicklistData });
+
+// ================= OAUTH ROUTES =================
+
+// Generate install URL for testing
+app.get("/install", (req, res) => {
+  const shop = req.query.shop;
+  if (!shop) {
+    return res.status(400).send(`
+      <h1>Missing Shop Parameter</h1>
+      <p>Please provide a shop parameter: /install?shop=yourstore.myshopify.com</p>
+      <p>Example: <a href="/install?shop=teststore.myshopify.com">/install?shop=teststore.myshopify.com</a></p>
+    `);
+  }
+
+  const scopes = "read_orders,write_draft_orders,read_customers,write_fulfillments";
+  const redirectUri = `${req.protocol}://${req.get('host')}/auth/callback`;
+  const installUrl = `https://${shop}/admin/oauth/authorize?client_id=${CLIENT_ID}&scope=${scopes}&redirect_uri=${encodeURIComponent(redirectUri)}`;
+
+  console.log(`🔗 Generated install URL for shop: ${shop}`);
+  res.send(`
+    <!DOCTYPE html>
+    <html>
+    <head>
+      <title>Install Picklist App</title>
+      <style>
+        body { font-family: sans-serif; padding: 40px; text-align: center; }
+        .install-button {
+          background: #008060;
+          color: white;
+          padding: 20px 40px;
+          text-decoration: none;
+          border-radius: 8px;
+          font-size: 18px;
+          display: inline-block;
+          margin: 20px;
+        }
+        .install-button:hover { background: #004c3f; }
+        .url { background: #f5f5f5; padding: 10px; border-radius: 4px; font-family: monospace; word-break: break-all; }
+      </style>
+    </head>
+    <body>
+      <h1>📦 Install Picklist App</h1>
+      <p>Click below to install the app on your Shopify store:</p>
+      <a href="${installUrl}" class="install-button">Install App →</a>
+      <p><small>Or copy this URL:</small></p>
+      <div class="url">${installUrl}</div>
+      <p><a href="/">← Back to Home</a></p>
+    </body>
+    </html>
+  `);
+});
+
+// Start OAuth flow
+app.get("/auth", (req, res) => {
+  const shop = req.query.shop;
+  if (!shop) {
+    return res.status(400).send("Missing shop parameter");
+  }
+
+  const scopes = "read_orders,write_draft_orders,read_customers,write_fulfillments";
+  const redirectUri = `${req.protocol}://${req.get('host')}/auth/callback`;
+  const installUrl = `https://${shop}/admin/oauth/authorize?client_id=${CLIENT_ID}&scope=${scopes}&redirect_uri=${encodeURIComponent(redirectUri)}`;
+
+  console.log(`🔗 Redirecting to Shopify OAuth: ${installUrl}`);
+  res.redirect(installUrl);
+});
+
+// Handle OAuth callback
+app.get("/auth/callback", async (req, res) => {
+  const { code, shop } = req.query;
+
+  if (!code || !shop) {
+    return res.status(400).send("Missing code or shop parameter");
+  }
+
+  try {
+    console.log(`🔄 Exchanging code for access token for shop: ${shop}`);
+
+    const response = await fetch(`https://${shop}/admin/oauth/access_token`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded",
+      },
+      body: new URLSearchParams({
+        client_id: CLIENT_ID,
+        client_secret: CLIENT_SECRET,
+        code: code,
+      }),
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      console.error("❌ OAuth token exchange failed:", errorText);
+      return res.status(500).send("Failed to exchange code for access token");
+    }
+
+    const data = await response.json();
+    const accessToken = data.access_token;
+
+    if (!accessToken) {
+      console.error("❌ No access token in response:", data);
+      return res.status(500).send("No access token received");
+    }
+
+    console.log(`✅ OAuth successful for shop: ${shop}`);
+
+    // Store the access token (in production, you'd store this in a database)
+    process.env.SHOPIFY_ADMIN_ACCESS_TOKEN = accessToken;
+    process.env.SHOP_NAME = shop.replace('.myshopify.com', '');
+
+    // For embedded apps, redirect to the embedded app interface
+    const embeddedUrl = `https://${shop}/admin/apps/${CLIENT_ID}`;
+    console.log(`🔗 Redirecting to embedded app: ${embeddedUrl}`);
+    res.redirect(embeddedUrl);
+
+  } catch (error) {
+    console.error("❌ OAuth callback error:", error);
+    res.status(500).send("OAuth callback failed");
+  }
+});
 
 // ================= ROUTES =================
 
@@ -1095,6 +1329,31 @@ app.get("/api/picklist/:id", async (req, res) => {
 
 // 8. Home page
 app.get("/", (req, res) => {
+  // Check if this is an embedded request
+  const embedded = req.query.embedded === '1';
+
+  if (embedded) {
+    // Return a minimal embedded interface
+    res.send(`
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <title>Picklist App</title>
+        <script src="https://cdn.shopify.com/shopifycloud/app-bridge.js"></script>
+      </head>
+      <body>
+        <div id="app">
+          <h1>📦 Picklist App</h1>
+          <p>Manage your order picklists</p>
+          <a href="/view-picklists" target="_blank">Open Picklist Manager</a>
+        </div>
+      </body>
+      </html>
+    `);
+    return;
+  }
+
+  // Regular web interface
   res.send(`
     <!DOCTYPE html>
     <html>
@@ -1220,8 +1479,7 @@ app.get("/", (req, res) => {
           <ol>
             <li>Go to <strong>Shopify Admin → Orders</strong></li>
             <li>Select one or more orders using checkboxes</li>
-            <li>Click the <strong>...</strong> (more actions) menu</li>
-            <li>Select <strong>Create Picklist</strong></li>
+            <li>Click the <strong>Create Picklist</strong> button that appears</li>
             <li>View and manage your picklists below</li>
           </ol>
         </div>

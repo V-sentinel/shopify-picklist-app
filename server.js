@@ -641,6 +641,9 @@ app.get("/", (req, res) => {
           <div class="header">
             <h1>📦 Picklist Manager</h1>
             <p>Manage your order picklists</p>
+            <p style="margin-top: 12px; color: #4b5563; max-width: 760px; line-height: 1.6;">
+              To create a picklist, open Shopify Admin → Orders, select one or more orders, then use the "Create Picklists" action from the Orders page.
+            </p>
           </div>
           <div id="content">
             <p>Loading picklists...</p>

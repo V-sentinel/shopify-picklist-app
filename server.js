@@ -365,16 +365,39 @@ app.get("/auth/callback", async (req, res) => {
   }
 });
 
-// ================= ROUTES =================
+// API endpoint for embedded app
+app.get("/api/picklists", async (req, res) => {
+  if (!pool) {
+    return res.status(503).json({ error: "Database not available" });
+  }
 
-// Health check endpoint (useful for Render)
-app.get("/health", (req, res) => {
-  res.json({ 
-    status: "healthy", 
-    timestamp: new Date().toISOString(),
-    database: pool ? "connected" : "disabled",
-    shop: SHOP || "not configured"
-  });
+  try {
+    const result = await pool.query(
+      "SELECT * FROM picklists ORDER BY created_at DESC"
+    );
+
+    const picklists = result.rows.map(row => row.picklist_data || {
+      picklist_number: 'UNKNOWN',
+      created_at: new Date().toISOString(),
+      status: 'pending',
+      order_info: { order_name: row.order_name || 'Unknown order' },
+      items: []
+    });
+
+    // Calculate stats
+    const stats = {
+      total: picklists.length,
+      pending: picklists.filter(p => p.status === 'pending').length,
+      picking: picklists.filter(p => p.status === 'picking').length,
+      packed: picklists.filter(p => p.status === 'packed').length,
+      shipped: picklists.filter(p => p.status === 'shipped').length
+    };
+
+    res.json({ picklists, stats });
+  } catch (err) {
+    console.error("❌ API error:", err);
+    res.status(500).json({ error: err.message });
+  }
 });
 
 // 1. Bulk Action → Creates picklist for selected orders
@@ -385,16 +408,12 @@ app.get("/bulk-action", async (req, res) => {
   
   if (ids.length === 0) {
     console.warn("⚠️ No order IDs provided");
-    return res.redirect("/view-picklists?error=no_orders");
+    return res.status(400).json({ error: "No order IDs provided" });
   }
 
   if (!pool) {
     console.error("❌ Cannot create picklist - database not available");
-    return res.status(503).send(`
-      <h1>Database Not Available</h1>
-      <p>Please configure DATABASE_URL in environment variables.</p>
-      <a href="/">Go Home</a>
-    `);
+    return res.status(503).json({ error: "Database not available" });
   }
 
   try {
@@ -432,641 +451,16 @@ app.get("/bulk-action", async (req, res) => {
     }
     
     const idsParam = picklists.map(p => p.picklist_number).join(',');
-    res.redirect(`/view-picklists?success=${encodeURIComponent(picklists.length)}&highlight=${encodeURIComponent(idsParam)}`);
+    res.json({ 
+      success: true, 
+      message: `Successfully created ${picklists.length} picklist(s)!`,
+      picklists: picklists.map(p => ({ id: p.picklist_number, order_name: p.order_info.order_name }))
+    });
   } catch (err) {
     console.error("❌ Bulk action error:", err);
-    res.status(500).send(`
-      <h1>Error Creating Picklist</h1>
-      <p>${err.message}</p>
-      <pre>${err.stack}</pre>
-      <a href="/view-picklists">View Existing Picklists</a><br>
-      <a href="/">Go Home</a>
-    `);
+    res.status(500).json({ error: err.message });
   }
 });
-
-// 2. View Saved Picklists with detailed view
-app.get("/view-picklists", async (req, res) => {
-  const successCount = req.query.success;
-  const error = req.query.error;
-  const highlightPicklist = req.query.highlight || '';
-  
-  if (!pool) {
-    return res.status(503).send(`
-      <!DOCTYPE html>
-      <html>
-      <head><title>Database Error</title></head>
-      <body style="font-family: sans-serif; padding: 40px; text-align: center;">
-        <h1>⚠️ Database Not Configured</h1>
-        <p>Please set the DATABASE_URL environment variable in Render.</p>
-        <p>You need to create a PostgreSQL database and add the connection string.</p>
-        <a href="/">Go Home</a>
-      </body>
-      </html>
-    `);
-  }
-  
-  try {
-    const result = await pool.query(
-      "SELECT * FROM picklists ORDER BY created_at DESC"
-    );
-    
-    let html = `
-      <!DOCTYPE html>
-      <html>
-      <head>
-        <meta charset="UTF-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>Picklist Manager</title>
-        <style>
-          * { margin: 0; padding: 0; box-sizing: border-box; }
-          body { 
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
-            background: #f5f5f5;
-            padding: 20px;
-          }
-          .container { max-width: 1400px; margin: 0 auto; }
-          .header {
-            background: linear-gradient(135deg, #008060 0%, #004c3f 100%);
-            color: white;
-            padding: 30px;
-            border-radius: 12px;
-            margin-bottom: 30px;
-            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
-          }
-          .header h1 { margin-bottom: 10px; }
-          .alert {
-            padding: 15px;
-            border-radius: 8px;
-            margin-bottom: 20px;
-            animation: slideDown 0.3s ease;
-          }
-          @keyframes slideDown {
-            from { transform: translateY(-20px); opacity: 0; }
-            to { transform: translateY(0); opacity: 1; }
-          }
-          .alert-success {
-            background: #d4edda;
-            color: #155724;
-            border: 1px solid #c3e6cb;
-          }
-          .alert-error {
-            background: #f8d7da;
-            color: #721c24;
-            border: 1px solid #f5c6cb;
-          }
-          .stats {
-            display: flex;
-            gap: 20px;
-            margin-top: 20px;
-            flex-wrap: wrap;
-          }
-          .stat-card {
-            background: rgba(255,255,255,0.2);
-            padding: 15px 25px;
-            border-radius: 8px;
-            backdrop-filter: blur(10px);
-          }
-          .stat-card h3 { font-size: 28px; margin-bottom: 5px; }
-          .stat-card p { opacity: 0.9; font-size: 14px; }
-          .filters {
-            background: white;
-            padding: 20px;
-            border-radius: 12px;
-            margin-bottom: 20px;
-            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-            display: flex;
-            gap: 15px;
-            flex-wrap: wrap;
-            align-items: center;
-          }
-          .filters input, .filters select {
-            padding: 10px;
-            border: 1px solid #ddd;
-            border-radius: 6px;
-            font-size: 14px;
-          }
-          .filters input { flex: 1; min-width: 200px; }
-          .picklist-grid {
-            display: grid;
-            gap: 20px;
-          }
-          .picklist-card {
-            background: white;
-            border-radius: 12px;
-            overflow: hidden;
-            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
-            transition: transform 0.2s, box-shadow 0.2s;
-          }
-          .picklist-card:hover {
-            transform: translateY(-2px);
-            box-shadow: 0 4px 16px rgba(0,0,0,0.15);
-          }
-          .picklist-card.highlight {
-            animation: highlight 2s ease;
-            border: 2px solid #008060;
-          }
-          @keyframes highlight {
-            0% { background: #fff9c4; }
-            100% { background: white; }
-          }
-          .picklist-header {
-            background: #f8f9fa;
-            padding: 20px;
-            border-bottom: 1px solid #e9ecef;
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            flex-wrap: wrap;
-            gap: 10px;
-            cursor: pointer;
-          }
-          .picklist-header h3 {
-            color: #008060;
-            font-size: 18px;
-          }
-          .status {
-            display: inline-block;
-            padding: 4px 12px;
-            border-radius: 20px;
-            font-size: 12px;
-            font-weight: 600;
-            text-transform: uppercase;
-          }
-          .status-pending { background: #ffc107; color: #856404; }
-          .status-picking { background: #17a2b8; color: white; }
-          .status-packed { background: #28a745; color: white; }
-          .status-shipped { background: #007bff; color: white; }
-          .picklist-body {
-            padding: 20px;
-            display: none;
-          }
-          .picklist-body.open {
-            display: block;
-          }
-          .info-grid {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
-            gap: 20px;
-            margin-bottom: 20px;
-          }
-          .info-section {
-            background: #f8f9fa;
-            padding: 15px;
-            border-radius: 8px;
-          }
-          .info-section h4 {
-            margin-bottom: 10px;
-            color: #495057;
-            border-bottom: 2px solid #dee2e6;
-            padding-bottom: 5px;
-          }
-          .items-table {
-            width: 100%;
-            border-collapse: collapse;
-            margin-top: 15px;
-          }
-          .items-table th,
-          .items-table td {
-            padding: 12px;
-            text-align: left;
-            border-bottom: 1px solid #dee2e6;
-          }
-          .items-table th {
-            background: #f8f9fa;
-            font-weight: 600;
-            color: #495057;
-          }
-          .items-table tr:hover {
-            background: #f8f9fa;
-          }
-          .quantity-input {
-            width: 70px;
-            padding: 5px;
-            border: 1px solid #ddd;
-            border-radius: 4px;
-            text-align: center;
-          }
-          .action-buttons {
-            display: flex;
-            gap: 10px;
-            margin-top: 20px;
-            justify-content: flex-end;
-            flex-wrap: wrap;
-          }
-          button {
-            padding: 10px 20px;
-            border: none;
-            border-radius: 6px;
-            cursor: pointer;
-            font-size: 14px;
-            font-weight: 500;
-            transition: all 0.2s;
-          }
-          .btn-primary {
-            background: #008060;
-            color: white;
-          }
-          .btn-primary:hover {
-            background: #004c3f;
-            transform: translateY(-1px);
-          }
-          .btn-secondary {
-            background: #6c757d;
-            color: white;
-          }
-          .btn-secondary:hover {
-            background: #5a6268;
-          }
-          .btn-danger {
-            background: #dc3545;
-            color: white;
-          }
-          .btn-danger:hover {
-            background: #c82333;
-          }
-          .btn-success {
-            background: #28a745;
-            color: white;
-          }
-          .btn-print {
-            background: #17a2b8;
-            color: white;
-          }
-          .status-select {
-            padding: 8px 15px;
-            border: 1px solid #ddd;
-            border-radius: 6px;
-            font-size: 14px;
-          }
-          .notes-area {
-            width: 100%;
-            padding: 10px;
-            border: 1px solid #ddd;
-            border-radius: 6px;
-            margin-top: 10px;
-            font-family: inherit;
-          }
-          @media print {
-            body { background: white; padding: 0; }
-            .filters, .action-buttons, .picklist-header .status, .btn-print { display: none; }
-            .picklist-body { display: block !important; }
-            .picklist-card { break-inside: avoid; margin-bottom: 20px; }
-          }
-          @media (max-width: 768px) {
-            .stats { flex-direction: column; }
-            .filters { flex-direction: column; align-items: stretch; }
-            .filters input, .filters select { width: 100%; }
-            .items-table { font-size: 12px; }
-            .items-table th, .items-table td { padding: 8px; }
-          }
-        </style>
-      </head>
-      <body>
-        <div class="container">
-          <div class="header">
-            <h1>📦 Picklist Manager</h1>
-            <p>Manage and track your order fulfillment picklists</p>
-    `;
-    
-    if (successCount) {
-      html += `<div class="alert alert-success">✅ Successfully created ${successCount} picklist(s)!</div>`;
-    }
-    if (error) {
-      html += `<div class="alert alert-error">⚠️ Error: ${error.replace(/_/g, ' ')}</div>`;
-    }
-    
-    const pendingCount = result.rows.filter(r => r.picklist_data?.status === 'pending').length;
-    const pickingCount = result.rows.filter(r => r.picklist_data?.status === 'picking').length;
-    const packedCount = result.rows.filter(r => r.picklist_data?.status === 'packed').length;
-    const shippedCount = result.rows.filter(r => r.picklist_data?.status === 'shipped').length;
-    
-    html += `
-            <div class="stats">
-              <div class="stat-card">
-                <h3>${result.rows.length}</h3>
-                <p>Total Picklists</p>
-              </div>
-              <div class="stat-card">
-                <h3>${pendingCount}</h3>
-                <p>Pending</p>
-              </div>
-              <div class="stat-card">
-                <h3>${pickingCount}</h3>
-                <p>In Progress</p>
-              </div>
-              <div class="stat-card">
-                <h3>${packedCount}</h3>
-                <p>Packed</p>
-              </div>
-              <div class="stat-card">
-                <h3>${shippedCount}</h3>
-                <p>Shipped</p>
-              </div>
-            </div>
-          </div>
-          
-          <div class="filters">
-            <input type="text" id="searchInput" placeholder="🔍 Search by order #, customer, or picklist #...">
-            <select id="statusFilter">
-              <option value="">All Status</option>
-              <option value="pending">Pending</option>
-              <option value="picking">In Progress</option>
-              <option value="packed">Packed</option>
-              <option value="shipped">Shipped</option>
-            </select>
-            <button class="btn-primary" onclick="printSelected()">🖨️ Print Selected</button>
-            <button class="btn-secondary" onclick="exportToCSV()">📊 Export to CSV</button>
-          </div>
-          
-          <div class="picklist-grid" id="picklistGrid">
-    `;
-    
-    if (result.rows.length === 0) {
-      html += `
-        <div style="text-align: center; padding: 60px; background: white; border-radius: 12px;">
-          <h3>📭 No picklists yet</h3>
-          <p>Go to Shopify Admin → Orders → Select orders → Click "Create Picklist"</p>
-          <a href="/" style="color: #008060;">Return to Home</a>
-        </div>
-      `;
-    }
-    
-    for (const row of result.rows) {
-      const picklist = row.picklist_data || (row.order_data ? createPicklistData(row.order_data) : {
-        picklist_number: 'UNKNOWN',
-        created_at: new Date().toISOString(),
-        status: 'pending',
-        order_info: {
-          order_name: row.order_name || 'Unknown order'
-        },
-        items: []
-      });
-      const isHighlight = highlightPicklist.includes(picklist.picklist_number);
-      const statusClass = `status-${picklist.status || 'pending'}`;
-      
-      html += `
-        <div class="picklist-card ${isHighlight ? 'highlight' : ''}" data-picklist-id="${picklist.picklist_number}" data-status="${picklist.status || 'pending'}">
-          <div class="picklist-header" onclick="togglePicklist('${picklist.picklist_number}')">
-            <div>
-              <h3>${escapeHtml(picklist.picklist_number)}</h3>
-              <p style="color: #6c757d; margin-top: 5px;">Order: ${picklist.order_info.order_name} | ${new Date(picklist.created_at).toLocaleDateString()}</p>
-            </div>
-            <div>
-              <span class="status ${statusClass}">${picklist.status || 'pending'}</span>
-              <span style="margin-left: 10px;">📦 ${picklist.total_items} items</span>
-            </div>
-          </div>
-          <div class="picklist-body" id="body-${picklist.picklist_number}">
-            <div class="info-grid">
-              <div class="info-section">
-                <h4>👤 Customer Information</h4>
-                ${picklist.customer ? `
-                  <p><strong>Name:</strong> ${escapeHtml(picklist.customer.name)}</p>
-                  <p><strong>Email:</strong> ${escapeHtml(picklist.customer.email || 'N/A')}</p>
-                  <p><strong>Phone:</strong> ${escapeHtml(picklist.customer.phone || 'N/A')}</p>
-                ` : '<p>No customer information</p>'}
-              </div>
-              <div class="info-section">
-                <h4>📮 Shipping Address</h4>
-                ${picklist.shipping_address ? `
-                  <p>${escapeHtml(picklist.shipping_address.name || '')}</p>
-                  <p>${escapeHtml(picklist.shipping_address.address1 || '')}</p>
-                  ${picklist.shipping_address.address2 ? `<p>${escapeHtml(picklist.shipping_address.address2)}</p>` : ''}
-                  <p>${escapeHtml(picklist.shipping_address.city || '')}, ${escapeHtml(picklist.shipping_address.province || '')} ${escapeHtml(picklist.shipping_address.zip || '')}</p>
-                  <p>${escapeHtml(picklist.shipping_address.country || '')}</p>
-                ` : '<p>No shipping address</p>'}
-              </div>
-              <div class="info-section">
-                <h4>📋 Order Details</h4>
-                <p><strong>Order Status:</strong> ${picklist.order_info.financial_status || 'N/A'}</p>
-                <p><strong>Fulfillment:</strong> ${picklist.order_info.fulfillment_status || 'Not fulfilled'}</p>
-                <p><strong>Total:</strong> ${picklist.currency} ${picklist.total_price}</p>
-                ${picklist.order_info.tags ? `<p><strong>Tags:</strong> ${escapeHtml(picklist.order_info.tags)}</p>` : ''}
-              </div>
-            </div>
-            
-            <h4>🛍️ Items to Pick</h4>
-            <table class="items-table">
-              <thead>
-                <tr><th>SKU</th><th>Product</th><th>Variant</th><th>Required</th><th>Picked</th><th>Location</th></tr>
-              </thead>
-              <tbody>
-      `;
-      
-      for (const item of picklist.items) {
-        const pickedQty = item.picked_quantity || 0;
-        html += `
-          <tr>
-            <td>${escapeHtml(item.sku)}</td>
-            <td>${escapeHtml(item.title)}</td>
-            <td>${escapeHtml(item.variant_title || '-')}</td>
-            <td>${item.quantity}</td>
-            <td>
-              <input type="number" class="quantity-input" data-picklist="${picklist.picklist_number}" data-sku="${escapeHtml(item.sku)}" value="${pickedQty}" min="0" max="${item.quantity}">
-              <span style="font-size: 12px; color: ${pickedQty === item.quantity ? '#28a745' : '#dc3545'}">
-                ${pickedQty === item.quantity ? '✓ Complete' : `${item.quantity - pickedQty} left`}
-              </span>
-            </td>
-            <td>${escapeHtml(item.location)}</td>
-          </tr>
-        `;
-      }
-      
-      html += `
-              </tbody>
-            </table>
-            
-            <div>
-              <label><strong>📝 Picklist Notes:</strong></label>
-              <textarea class="notes-area" id="notes-${picklist.picklist_number}" rows="3" placeholder="Add any notes about this picklist...">${escapeHtml(picklist.notes || '')}</textarea>
-            </div>
-            
-            <div class="action-buttons">
-              <button class="btn-print" onclick="printPicklist('${picklist.picklist_number}')">🖨️ Print</button>
-              <button class="btn-success" onclick="updatePickedQuantities('${picklist.picklist_number}')">✓ Update Picked</button>
-              <select id="status-${picklist.picklist_number}" class="status-select">
-                <option value="pending" ${picklist.status === 'pending' ? 'selected' : ''}>Pending</option>
-                <option value="picking" ${picklist.status === 'picking' ? 'selected' : ''}>In Progress</option>
-                <option value="packed" ${picklist.status === 'packed' ? 'selected' : ''}>Packed</option>
-                <option value="shipped" ${picklist.status === 'shipped' ? 'selected' : ''}>Shipped</option>
-              </select>
-              <button class="btn-primary" onclick="updateStatus('${picklist.picklist_number}')">Update Status</button>
-              <button class="btn-danger" onclick="deletePicklist('${picklist.picklist_number}')">🗑️ Delete</button>
-            </div>
-          </div>
-        </div>
-      `;
-    }
-    
-    html += `
-          </div>
-        </div>
-        
-        <script>
-          function togglePicklist(id) {
-            const body = document.getElementById('body-' + id);
-            body.classList.toggle('open');
-          }
-          
-          function printPicklist(id) {
-            const element = document.getElementById('body-' + id);
-            const originalDisplay = element.style.display;
-            element.style.display = 'block';
-            window.print();
-            element.style.display = originalDisplay;
-          }
-          
-          function printSelected() {
-            window.print();
-          }
-          
-          async function updatePickedQuantities(picklistId) {
-            const inputs = document.querySelectorAll(\`input[data-picklist="\${picklistId}"]\`);
-            const pickedItems = {};
-            inputs.forEach(input => {
-              const sku = input.dataset.sku;
-              const quantity = parseInt(input.value) || 0;
-              if (quantity > 0) {
-                pickedItems[sku] = quantity;
-              }
-            });
-            
-            const response = await fetch('/api/update-picked', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ picklistId, pickedItems })
-            });
-            
-            if (response.ok) {
-              alert('✅ Picked quantities updated successfully!');
-              location.reload();
-            } else {
-              const error = await response.text();
-              alert('❌ Error updating picked quantities: ' + error);
-            }
-          }
-          
-          async function updateStatus(picklistId) {
-            const select = document.getElementById('status-' + picklistId);
-            const status = select.value;
-            const notes = document.getElementById('notes-' + picklistId).value;
-            
-            const response = await fetch('/api/update-status', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ picklistId, status, notes })
-            });
-            
-            if (response.ok) {
-              alert('✅ Status updated successfully!');
-              location.reload();
-            } else {
-              alert('❌ Error updating status');
-            }
-          }
-          
-          async function deletePicklist(picklistId) {
-            if (confirm('⚠️ Are you sure you want to delete this picklist? This action cannot be undone.')) {
-              const response = await fetch('/api/delete-picklist', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ picklistId })
-              });
-              
-              if (response.ok) {
-                alert('✅ Picklist deleted successfully');
-                location.reload();
-              } else {
-                alert('❌ Error deleting picklist');
-              }
-            }
-          }
-          
-          function exportToCSV() {
-            const rows = [['Picklist #', 'Order #', 'Customer', 'SKU', 'Product', 'Quantity', 'Status', 'Created Date']];
-            const cards = document.querySelectorAll('.picklist-card');
-            cards.forEach(card => {
-              const picklistId = card.querySelector('.picklist-header h3').innerText;
-              const orderText = card.querySelector('.picklist-header p').innerText;
-              const orderName = orderText.split('|')[0].trim();
-              const customerName = card.querySelector('.info-section:first-child p:first-child')?.innerText.replace('Name:', '').trim() || 'N/A';
-              const status = card.querySelector('.status').innerText;
-              const createdDate = orderText.split('|')[1]?.trim() || '';
-              const items = card.querySelectorAll('.items-table tbody tr');
-              items.forEach(item => {
-                const sku = item.cells[0].innerText;
-                const product = item.cells[1].innerText;
-                const quantity = item.cells[3].innerText;
-                rows.push([picklistId, orderName, customerName, sku, product, quantity, status, createdDate]);
-              });
-            });
-            
-            const csvContent = rows.map(row => row.map(cell => \`"\${String(cell).replace(/"/g, '""')}"\`).join(',')).join('\\n');
-            
-            const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
-            const url = URL.createObjectURL(blob);
-            const a = document.createElement('a');
-            a.href = url;
-            a.download = \`picklists_export_\${new Date().toISOString().slice(0,19).replace(/:/g, '-')}.csv\`;
-            a.click();
-            URL.revokeObjectURL(url);
-          }
-          
-          // Filter functionality
-          const searchInput = document.getElementById('searchInput');
-          const statusFilter = document.getElementById('statusFilter');
-          
-          if (searchInput) searchInput.addEventListener('input', filterPicklists);
-          if (statusFilter) statusFilter.addEventListener('change', filterPicklists);
-          
-          function filterPicklists() {
-            const searchTerm = document.getElementById('searchInput')?.value.toLowerCase() || '';
-            const statusFilterValue = document.getElementById('statusFilter')?.value || '';
-            const cards = document.querySelectorAll('.picklist-card');
-            
-            cards.forEach(card => {
-              const text = card.innerText.toLowerCase();
-              const status = card.dataset.status;
-              const matchesSearch = text.includes(searchTerm);
-              const matchesStatus = !statusFilterValue || status === statusFilterValue;
-              
-              card.style.display = (matchesSearch && matchesStatus) ? '' : 'none';
-            });
-          }
-          
-          // Open first picklist by default on mobile
-          if (window.innerWidth <= 768 && document.querySelector('.picklist-card')) {
-            const firstId = document.querySelector('.picklist-card .picklist-header h3').innerText;
-            togglePicklist(firstId);
-          }
-        </script>
-      </body>
-      </html>
-    `;
-    
-    res.send(html);
-  } catch (err) {
-    console.error("❌ Error loading picklists:", err);
-    res.status(500).send(`
-      <h1>Error Loading Picklists</h1>
-      <p>${err.message}</p>
-      <pre>${err.stack}</pre>
-      <a href="/">Go Home</a>
-    `);
-  }
-});
-
-// Helper function to escape HTML
-function escapeHtml(str) {
-  if (!str) return '';
-  return str
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#39;');
-}
 
 // 4. API endpoint to update picked quantities
 app.post("/api/update-picked", async (req, res) => {
@@ -1203,169 +597,153 @@ app.get("/api/picklist/:id", async (req, res) => {
   }
 });
 
-// 8. Home page
+// 8. Home page - Embedded only
 app.get("/", (req, res) => {
   // Check if this is an embedded request
   const embedded = req.query.embedded === '1';
 
   if (embedded) {
-    // Return a minimal embedded interface
+    // Return minimal embedded interface
     res.send(`
       <!DOCTYPE html>
       <html>
       <head>
         <title>Picklist App</title>
         <script src="https://cdn.shopify.com/shopifycloud/app-bridge.js"></script>
+        <style>
+          body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; margin: 0; padding: 20px; }
+          .container { max-width: 1200px; margin: 0 auto; }
+          .header { margin-bottom: 20px; }
+          .stats { display: flex; gap: 20px; margin-bottom: 20px; }
+          .stat-card { background: #f8f9fa; padding: 15px; border-radius: 8px; border: 1px solid #e9ecef; }
+          .stat-card h3 { margin: 0 0 5px 0; font-size: 24px; }
+          .stat-card p { margin: 0; color: #6c757d; }
+          .picklist-grid { display: grid; gap: 15px; }
+          .picklist-card { background: white; border: 1px solid #e9ecef; border-radius: 8px; padding: 20px; }
+          .picklist-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px; }
+          .picklist-header h3 { margin: 0; }
+          .status { padding: 4px 8px; border-radius: 4px; font-size: 12px; font-weight: bold; }
+          .status-pending { background: #fff3cd; color: #856404; }
+          .status-picking { background: #cce5ff; color: #004085; }
+          .status-packed { background: #d1ecf1; color: #0c5460; }
+          .status-shipped { background: #d4edda; color: #155724; }
+          .items-list { margin-top: 15px; }
+          .item { display: flex; justify-content: space-between; padding: 8px 0; border-bottom: 1px solid #f8f9fa; }
+          .item:last-child { border-bottom: none; }
+          .item-info { flex: 1; }
+          .item-title { font-weight: 500; margin: 0; }
+          .item-sku { color: #6c757d; font-size: 14px; margin: 2px 0 0 0; }
+          .item-quantity { font-weight: bold; color: #007bff; }
+        </style>
       </head>
       <body>
-        <div id="app">
-          <h1>📦 Picklist App</h1>
-          <p>Manage your order picklists</p>
-          <a href="/view-picklists" target="_blank">Open Picklist Manager</a>
+        <div class="container">
+          <div class="header">
+            <h1>📦 Picklist Manager</h1>
+            <p>Manage your order picklists</p>
+          </div>
+          <div id="content">
+            <p>Loading picklists...</p>
+          </div>
         </div>
+
+        <script>
+          async function loadPicklists() {
+            try {
+              const response = await fetch('/api/picklists');
+              const data = await response.json();
+
+              if (data.error) {
+                document.getElementById('content').innerHTML = '<p>Error loading picklists: ' + data.error + '</p>';
+                return;
+              }
+
+              const picklists = data.picklists || [];
+              const stats = data.stats || { total: 0, pending: 0, picking: 0, packed: 0, shipped: 0 };
+
+              let html = \`
+                <div class="stats">
+                  <div class="stat-card">
+                    <h3>\${stats.total}</h3>
+                    <p>Total Picklists</p>
+                  </div>
+                  <div class="stat-card">
+                    <h3>\${stats.pending}</h3>
+                    <p>Pending</p>
+                  </div>
+                  <div class="stat-card">
+                    <h3>\${stats.picking}</h3>
+                    <p>In Progress</p>
+                  </div>
+                  <div class="stat-card">
+                    <h3>\${stats.packed}</h3>
+                    <p>Packed</p>
+                  </div>
+                  <div class="stat-card">
+                    <h3>\${stats.shipped}</h3>
+                    <p>Shipped</p>
+                  </div>
+                </div>
+
+                <div class="picklist-grid">
+              \`;
+
+              if (picklists.length === 0) {
+                html += '<div class="picklist-card"><p>No picklists yet. Create picklists from the Orders page.</p></div>';
+              } else {
+                picklists.forEach(picklist => {
+                  const statusClass = \`status-\${picklist.status || 'pending'}\`;
+                  const items = picklist.items || [];
+
+                  html += \`
+                    <div class="picklist-card">
+                      <div class="picklist-header">
+                        <h3>\${picklist.picklist_number}</h3>
+                        <span class="\${statusClass} status">\${picklist.status || 'pending'}</span>
+                      </div>
+                      <p><strong>Order:</strong> \${picklist.order_info?.order_name || 'Unknown'}</p>
+                      <p><strong>Created:</strong> \${new Date(picklist.created_at).toLocaleDateString()}</p>
+
+                      <div class="items-list">
+                        <h4>Items to Pick:</h4>
+                  \`;
+
+                  items.forEach(item => {
+                    html += \`
+                      <div class="item">
+                        <div class="item-info">
+                          <p class="item-title">\${item.title || 'Unknown product'}</p>
+                          <p class="item-sku">SKU: \${item.sku || 'N/A'}</p>
+                        </div>
+                        <div class="item-quantity">Qty: \${item.quantity || 0}</div>
+                      </div>
+                    \`;
+                  });
+
+                  html += \`
+                      </div>
+                    </div>
+                  \`;
+                });
+              }
+
+              html += '</div>';
+              document.getElementById('content').innerHTML = html;
+            } catch (error) {
+              document.getElementById('content').innerHTML = '<p>Error loading picklists: ' + error.message + '</p>';
+            }
+          }
+
+          loadPicklists();
+        </script>
       </body>
       </html>
     `);
     return;
   }
 
-  // Regular web interface
-  res.send(`
-    <!DOCTYPE html>
-    <html>
-    <head>
-      <meta charset="UTF-8">
-      <meta name="viewport" content="width=device-width, initial-scale=1.0">
-      <title>Picklist App - Shopify Order Fulfillment</title>
-      <style>
-        * { margin: 0; padding: 0; box-sizing: border-box; }
-        body {
-          font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
-          background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-          margin: 0;
-          min-height: 100vh;
-          display: flex;
-          align-items: center;
-          justify-content: center;
-          padding: 20px;
-        }
-        .container {
-          background: white;
-          border-radius: 20px;
-          padding: 50px;
-          max-width: 650px;
-          text-align: center;
-          box-shadow: 0 20px 60px rgba(0,0,0,0.3);
-          animation: fadeInUp 0.6s ease;
-        }
-        @keyframes fadeInUp {
-          from {
-            opacity: 0;
-            transform: translateY(30px);
-          }
-          to {
-            opacity: 1;
-            transform: translateY(0);
-          }
-        }
-        h1 {
-          color: #008060;
-          font-size: 48px;
-          margin-bottom: 10px;
-        }
-        .emoji {
-          font-size: 64px;
-          margin-bottom: 20px;
-        }
-        p {
-          color: #666;
-          line-height: 1.6;
-          margin-bottom: 30px;
-        }
-        .button {
-          display: inline-block;
-          background: #008060;
-          color: white;
-          padding: 15px 30px;
-          text-decoration: none;
-          border-radius: 8px;
-          font-weight: 600;
-          transition: all 0.3s;
-          margin: 5px;
-        }
-        .button:hover {
-          background: #004c3f;
-          transform: translateY(-2px);
-          box-shadow: 0 5px 15px rgba(0,0,0,0.2);
-        }
-        .button-outline {
-          background: transparent;
-          border: 2px solid #008060;
-          color: #008060;
-        }
-        .button-outline:hover {
-          background: #008060;
-          color: white;
-        }
-        .steps {
-          text-align: left;
-          background: #f8f9fa;
-          padding: 25px;
-          border-radius: 10px;
-          margin-top: 30px;
-        }
-        .steps h3 {
-          color: #333;
-          margin-bottom: 15px;
-        }
-        .steps ol {
-          margin-left: 20px;
-          color: #666;
-        }
-        .steps li {
-          margin: 10px 0;
-        }
-        .status-badge {
-          display: inline-block;
-          background: #e8f5e9;
-          color: #2e7d32;
-          padding: 5px 10px;
-          border-radius: 5px;
-          font-size: 12px;
-          margin-top: 20px;
-        }
-        @media (max-width: 600px) {
-          .container { padding: 30px 20px; }
-          h1 { font-size: 32px; }
-          .button { display: block; margin: 10px; }
-        }
-      </style>
-    </head>
-    <body>
-      <div class="container">
-        <div class="emoji">📦</div>
-        <h1>Picklist App</h1>
-        <p>Streamline your order fulfillment process with organized picklists</p>
-        <div>
-          <a href="/view-picklists" class="button">View All Picklists →</a>
-          <a href="/health" class="button button-outline">Health Check</a>
-        </div>
-        <div class="steps">
-          <h3>📋 How to use:</h3>
-          <ol>
-            <li>Go to <strong>Shopify Admin → Orders</strong></li>
-            <li>Select one or more orders using checkboxes</li>
-            <li>Click the <strong>Create Picklist</strong> button that appears</li>
-            <li>View and manage your picklists below</li>
-          </ol>
-        </div>
-        <div class="status-badge">
-          ✅ App is running | ${SHOP ? `Shop: ${SHOP}` : 'No shop configured'}
-        </div>
-      </div>
-    </body>
-    </html>
-  `);
+  // If not embedded, redirect to Shopify
+  res.redirect('https://admin.shopify.com/store/YOUR_STORE/apps/YOUR_APP_ID');
 });
 
 // Error handling middleware

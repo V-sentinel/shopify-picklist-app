@@ -56,155 +56,9 @@ if (DATABASE_URL) {
 } else {
   console.warn("⚠️ No DATABASE_URL - Running without database (demo mode)");
 }
-npm install -g @shopify/cli
-shopify app devnpm install -g @shopify/cli
-shopify app dev
+
 async function initDB() {
-  if (!pool) {  # Check for running Node processes
-  ps aux | grep node
-  
-  # Check if port 3000 is in use
-  lsof -i :3000  # Check for running Node processes
-  ps aux | grep node
-  
-  # Check if port 3000 is in use
-  lsof -i :3000  # Check for running Node processes
-  ps aux | grep node
-  
-  # Check if port 3000 is in use
-  lsof -i :3000  # Check for running Node processes
-  ps aux | grep node
-  
-  # Check if port 3000 is in use
-  lsof -i :3000  # Check for running Node processes
-  ps aux | grep node
-  
-  # Check if port 3000 is in use
-  lsof -i :3000  # Check for running Node processes
-  ps aux | grep node
-  
-  # Check if port 3000 is in use
-  lsof -i :3000  # Check for running Node processes
-  ps aux | grep node
-  
-  # Check if port 3000 is in use
-  lsof -i :3000  # Check for running Node processes
-  ps aux | grep node
-  
-  # Check if port 3000 is in use
-  lsof -i :3000  # Check for running Node processes
-  ps aux | grep node
-  
-  # Check if port 3000 is in use
-  lsof -i :3000  # Check for running Node processes
-  ps aux | grep node
-  
-  # Check if port 3000 is in use
-  lsof -i :3000  # Check for running Node processes
-  ps aux | grep node
-  
-  # Check if port 3000 is in use
-  lsof -i :3000  # Check for running Node processes
-  ps aux | grep node
-  
-  # Check if port 3000 is in use
-  lsof -i :3000  # Check for running Node processes
-  ps aux | grep node
-  
-  # Check if port 3000 is in use
-  lsof -i :3000  # Check for running Node processes
-  ps aux | grep node
-  
-  # Check if port 3000 is in use
-  lsof -i :3000  # Check for running Node processes
-  ps aux | grep node
-  
-  # Check if port 3000 is in use
-  lsof -i :3000  # Check for running Node processes
-  ps aux | grep node
-  
-  # Check if port 3000 is in use
-  lsof -i :3000  # Check for running Node processes
-  ps aux | grep node
-  
-  # Check if port 3000 is in use
-  lsof -i :3000  # Check for running Node processes
-  ps aux | grep node
-  
-  # Check if port 3000 is in use
-  lsof -i :3000  # Check for running Node processes
-  ps aux | grep node
-  
-  # Check if port 3000 is in use
-  lsof -i :3000  # Check for running Node processes
-  ps aux | grep node
-  
-  # Check if port 3000 is in use
-  lsof -i :3000  # Check for running Node processes
-  ps aux | grep node
-  
-  # Check if port 3000 is in use
-  lsof -i :3000  # Check for running Node processes
-  ps aux | grep node
-  
-  # Check if port 3000 is in use
-  lsof -i :3000  # Check for running Node processes
-  ps aux | grep node
-  
-  # Check if port 3000 is in use
-  lsof -i :3000  # Check for running Node processes
-  ps aux | grep node
-  
-  # Check if port 3000 is in use
-  lsof -i :3000  # Check for running Node processes
-  ps aux | grep node
-  
-  # Check if port 3000 is in use
-  lsof -i :3000  # Check for running Node processes
-  ps aux | grep node
-  
-  # Check if port 3000 is in use
-  lsof -i :3000  # Check for running Node processes
-  ps aux | grep node
-  
-  # Check if port 3000 is in use
-  lsof -i :3000  # Check for running Node processes
-  ps aux | grep node
-  
-  # Check if port 3000 is in use
-  lsof -i :3000  # Check for running Node processes
-  ps aux | grep node
-  
-  # Check if port 3000 is in use
-  lsof -i :3000  # Check for running Node processes
-  ps aux | grep node
-  
-  # Check if port 3000 is in use
-  lsof -i :3000  # Check for running Node processes
-  ps aux | grep node
-  
-  # Check if port 3000 is in use
-  lsof -i :3000  # Check for running Node processes
-  ps aux | grep node
-  
-  # Check if port 3000 is in use
-  lsof -i :3000  # Check for running Node processes
-  ps aux | grep node
-  
-  # Check if port 3000 is in use
-  lsof -i :3000  # Check for running Node processes
-  ps aux | grep node
-  
-  # Check if port 3000 is in use
-  lsof -i :3000  # Check for running Node processes
-  ps aux | grep node
-  
-  # Check if port 3000 is in use
-  lsof -i :3000  # Check for running Node processes
-  ps aux | grep node
-  
-  # Check if port 3000 is in use
-  lsof -i :3000
+  if (!pool) {
     console.warn("⚠️ Database not available - skipping DB initialization");
     return false;
   }
@@ -225,7 +79,16 @@ async function initDB() {
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       );
     `);
-    
+
+    await pool.query(`
+      ALTER TABLE picklists
+        ADD COLUMN IF NOT EXISTS order_name TEXT,
+        ADD COLUMN IF NOT EXISTS order_data JSONB,
+        ADD COLUMN IF NOT EXISTS picklist_data JSONB,
+        ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP;
+    `);
+
     // Create index for better performance
     await pool.query(`
       CREATE INDEX IF NOT EXISTS idx_picklists_order_name ON picklists(order_name);
@@ -313,21 +176,26 @@ function generatePicklistNumber() {
 }
 
 function createPicklistData(order) {
-  const items = order.line_items.map(item => ({
+  if (!order || !Array.isArray(order.line_items)) {
+    console.warn('⚠️ createPicklistData received invalid order data:', order && order.id ? order.id : 'unknown');
+    order = order || {};
+  }
+
+  const items = Array.isArray(order.line_items) ? order.line_items.map(item => ({
     product_id: item.product_id,
     variant_id: item.variant_id,
     sku: item.sku || 'N/A',
-    title: item.title,
+    title: item.title || 'Unknown product',
     variant_title: item.variant_title || 'Default',
-    quantity: item.quantity,
-    price: item.price,
+    quantity: item.quantity || 0,
+    price: item.price || '0.00',
     location: item.location_id || 'Main Warehouse',
     barcode: item.barcode || null,
-    grams: item.grams,
-    requires_shipping: item.requires_shipping,
+    grams: item.grams || 0,
+    requires_shipping: item.requires_shipping || false,
     fulfillment_service: item.fulfillment_service || 'manual',
     picked_quantity: 0 // Track how many have been picked
-  }));
+  })) : [];
 
   return {
     picklist_number: generatePicklistNumber(),
@@ -925,7 +793,15 @@ app.get("/view-picklists", async (req, res) => {
     }
     
     for (const row of result.rows) {
-      const picklist = row.picklist_data || createPicklistData(row.order_data);
+      const picklist = row.picklist_data || (row.order_data ? createPicklistData(row.order_data) : {
+        picklist_number: 'UNKNOWN',
+        created_at: new Date().toISOString(),
+        status: 'pending',
+        order_info: {
+          order_name: row.order_name || 'Unknown order'
+        },
+        items: []
+      });
       const isHighlight = highlightPicklist.includes(picklist.picklist_number);
       const statusClass = `status-${picklist.status || 'pending'}`;
       
